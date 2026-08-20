@@ -12,7 +12,9 @@
  * 前端职责（对应方案 1/3）：
  *   - 从 GET /__dsh-peak-pricing/config 拉取高峰期定义；
  *   - 通过 ctx.modelDirectories 读取当前会话选中的 provider/model；
- *   - 用共享 schedule 逻辑判断高峰/低谷，常显状态胶囊并在进出高峰时通知；
+ *   - 用共享 schedule 逻辑判断高峰/低谷：高峰时给 document.body 加
+ *     dshpp-peak 类，把输入框旁模型选择器里的模型名染成橙色（低谷
+ *     不显示任何标识，无感）；进出高峰时各弹一条自动消失的临时通知；
  *   - 拦截当前会话 InputShell.submit：高峰提交时调用 host 的
  *     /__dsh-peak-pricing/submit-confirm，由 ctx.userQuestions 在对话窗口
  *     中提问；选择“暂不开始”则不调用原 submit，草稿自然留在输入框。
@@ -23,6 +25,8 @@ const SUBMIT_CONFIRM_URL = "/__dsh-peak-pricing/submit-confirm";
 const TICK_MS = 5000;
 const CONFIG_TICKS = 6; // 每 30 秒重拉一次配置
 const NOTICE_LIFETIME_MS = 8000;
+/** 高峰时加到 document.body 上的类：CSS 据此把模型名染橙。 */
+const PEAK_BODY_CLASS = "dshpp-peak";
 
 const react = require("react");
 const {
@@ -379,11 +383,13 @@ function createController(ctx) {
   }
 
   const disposeSessions = sessions.list.subscribe(onSessionsChanged);
+  const unsubscribePeakClass = store.subscribe(syncPeakClass);
 
   function start() {
     if (disposed) return;
     onSessionsChanged();
     void refreshConfig();
+    syncPeakClass();
     tickTimer = setInterval(() => {
       recompute();
       tick += 1;
@@ -401,11 +407,27 @@ function createController(ctx) {
     }
   }
 
+  /** 把当前高峰状态镜像到 document.body 的类名上，驱动模型名染色 CSS。 */
+  function syncPeakClass() {
+    if (typeof document === "undefined" || document.body == null) return;
+    const snapshot = store.getSnapshot();
+    const active = !disposed
+      && snapshot.configState === "ready"
+      && snapshot.model !== null
+      && snapshot.peak !== null
+      && snapshot.peak.peak === true;
+    document.body.classList.toggle(PEAK_BODY_CLASS, active);
+  }
+
   function dispose() {
     if (disposed) return;
     disposed = true;
     disposeSessions();
     unbindModel();
+    unsubscribePeakClass();
+    if (typeof document !== "undefined" && document.body != null) {
+      document.body.classList.remove(PEAK_BODY_CLASS);
+    }
     if (tickTimer !== null) clearInterval(tickTimer);
     if (typeof document !== "undefined") {
       document.removeEventListener("visibilitychange", onVisibilityChange);
@@ -435,37 +457,10 @@ function createController(ctx) {
   };
 }
 
-/* ---- 高峰/低谷状态胶囊与进入/离开通知 ---- */
-function statusCopy(snapshot) {
-  if (snapshot.configState === "error") {
-    return { text: "高峰计价 · 配置错误", className: "dshpp-pill dshpp-error" };
-  }
-  if (snapshot.model === null) {
-    return { text: "高峰计价 · 未选择模型", className: "dshpp-pill dshpp-neutral" };
-  }
-  const label = modelLabel(snapshot.model);
-  if (snapshot.peak !== null && snapshot.peak.peak) {
-    return { text: `高峰 · ${label}`, className: "dshpp-pill dshpp-peak" };
-  }
-  return { text: `低谷 · ${label}`, className: "dshpp-pill dshpp-off" };
-}
-
-function statusTitle(snapshot) {
-  if (snapshot.configState === "error") {
-    return `高峰计价配置读取失败：${snapshot.configError ?? "unknown"}`;
-  }
-  if (snapshot.model === null) {
-    return "尚未读取到当前会话的模型选择";
-  }
-  if (snapshot.peak !== null && snapshot.peak.peak) {
-    return `高峰期：${peakPeriodText(snapshot.peak)}`;
-  }
-  if (snapshot.peak !== null) {
-    return "当前时段为低谷";
-  }
-  return "高峰期定义尚未就绪";
-}
-
+/* ---- 进入/离开高峰的临时通知 ----
+ * 常显状态不再用独立胶囊：高峰时模型选择器里的模型名直接染橙（见 CSS
+ * 中 body.dshpp-peak 规则），低谷完全无感。这里只渲染进出高峰时弹出的
+ * 自动消失通知。 */
 function PeakPricingOverlay(props) {
   const { store, api } = props;
   const snapshot = useSyncExternalStore(
@@ -480,41 +475,28 @@ function PeakPricingOverlay(props) {
     return () => clearTimeout(timer);
   }, [snapshot.notice?.seq]);
 
-  const status = statusCopy(snapshot);
-
+  if (snapshot.notice === null) return null;
   return h(
     "div",
     { className: "dshpp-root" },
-    snapshot.notice === null
-      ? null
-      : h(
-        "div",
-        {
-          className: `dshpp-notice dshpp-notice-${snapshot.notice.tone}`,
-          role: "status",
-        },
-        snapshot.notice.text,
-      ),
     h(
       "div",
       {
-        className: status.className,
-        title: statusTitle(snapshot),
+        className: `dshpp-notice dshpp-notice-${snapshot.notice.tone}`,
         role: "status",
       },
-      status.text,
+      snapshot.notice.text,
     ),
   );
 }
 
-/* ---- CSS ---- */
+/* ---- CSS ----
+ * 模型名染色：composer 卡片内唯一的 aria-haspopup="menu" 按钮就是
+ * ModelSelect 触发器（PermissionSelect 用 listbox、WorkspaceChip 在卡片外），
+ * 其颜色只被模型名 span 继承（effort 与 chevron 各自有显式颜色）。 */
 const CSS = `
-.dshpp-root{position:fixed;right:14px;bottom:12px;z-index:10000;display:flex;flex-direction:column;align-items:flex-end;gap:8px;pointer-events:none;font-family:var(--dsw-font-family,inherit);}
-.dshpp-pill{pointer-events:auto;padding:5px 10px;border-radius:999px;font-size:12px;line-height:1.3;white-space:nowrap;border:1px solid var(--dsw-alias-border-l1,#30363d);background:var(--dsw-alias-interactive-bg-default,rgba(22,27,34,.92));color:var(--dsw-alias-text-primary,#e6edf3);box-shadow:0 4px 14px rgba(0,0,0,.25);}
-.dshpp-peak{background:rgba(180,90,30,.92);border-color:rgba(255,150,70,.55);color:#fff7ed;}
-.dshpp-off{background:rgba(22,110,70,.92);border-color:rgba(90,220,140,.5);color:#ecfff5;}
-.dshpp-neutral{opacity:.82;}
-.dshpp-error{background:rgba(150,40,40,.92);border-color:rgba(255,110,110,.55);color:#fff2f2;}
+body.dshpp-peak [data-composer-card] button[aria-haspopup="menu"]{color:var(--dsw-alias-state-warn-label,#e07b39);}
+.dshpp-root{position:fixed;right:14px;bottom:12px;z-index:10000;pointer-events:none;font-family:var(--dsw-font-family,inherit);}
 .dshpp-notice{pointer-events:auto;max-width:340px;padding:8px 11px;border-radius:10px;font-size:12px;line-height:1.45;border:1px solid rgba(255,255,255,.14);background:rgba(22,27,34,.95);color:var(--dsw-alias-text-primary,#e6edf3);box-shadow:0 8px 28px rgba(0,0,0,.35);}
 .dshpp-notice-peak{border-color:rgba(255,160,80,.55);}
 .dshpp-notice-off{border-color:rgba(90,220,140,.5);}

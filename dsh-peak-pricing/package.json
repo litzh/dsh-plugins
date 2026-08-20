@@ -12,6 +12,7 @@
   "files": [
     "src",
     "lib",
+    "examples",
     "cordis.patch.yml"
   ],
   "scripts": {

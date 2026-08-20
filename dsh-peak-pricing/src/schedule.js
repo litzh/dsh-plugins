@@ -267,7 +267,10 @@ export function normalizeConfig(input, fallbackTimeZone) {
     if (typeof rule !== 'object' || rule === null || Array.isArray(rule)) {
       throw new TypeError(`${where} must be an object`)
     }
-    if (typeof rule.provider !== 'string' || rule.provider.trim() === '') {
+    let provider = rule.provider
+    if (provider === undefined || provider === null) {
+      provider = '*' // 缺省匹配所有供应商
+    } else if (typeof provider !== 'string' || provider.trim() === '') {
       throw new TypeError(`${where}.provider must be a non-empty string`)
     }
     if (typeof rule.model !== 'string' || rule.model.trim() === '') {
@@ -318,7 +321,7 @@ export function normalizeConfig(input, fallbackTimeZone) {
     })
 
     return {
-      provider: rule.provider,
+      provider,
       model: rule.model,
       timezone,
       periods,

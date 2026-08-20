@@ -38,8 +38,23 @@ function createStore(initial) {
 
 function createFakeDocument() {
   const listeners = new Set()
+  const classes = new Set()
   return {
     visibilityState: 'visible',
+    body: {
+      classList: {
+        toggle(name, force) {
+          if (force) classes.add(name)
+          else classes.delete(name)
+        },
+        remove(name) {
+          classes.delete(name)
+        },
+        contains(name) {
+          return classes.has(name)
+        },
+      },
+    },
     head: { appendChild() {} },
     querySelector() {
       return null
@@ -265,6 +280,12 @@ test('提交确认走对话窗口 host 提问：defer 不提交，continue 调�
     assert.equal(snapshot.model.provider, 'deepseek-official')
     assert.equal(snapshot.peak.peak, true)
 
+    // 高峰时模型名染色依赖 body 上的 dshpp-peak 类。
+    assert.equal(
+      harness.document.body.classList.contains('dshpp-peak'), true,
+      '高峰时应给 body 加 dshpp-peak 类',
+    )
+
     // 高峰提交：不再创建浏览器模态，而是等待 host 的提交确认请求。
     harness.shell.submit('queue')
     await waitFor(() => harness.submitConfirmCalls.length === 1, '应调用 host submit-confirm 接口')
@@ -294,5 +315,9 @@ test('提交确认走对话窗口 host 提问：defer 不提交，continue 调�
     assert.equal(harness.getLastMode(), 'queue')
   } finally {
     harness.dispose()
+    assert.equal(
+      harness.document.body.classList.contains('dshpp-peak'), false,
+      'dispose 后应移除 body 上的 dshpp-peak 类',
+    )
   }
 })

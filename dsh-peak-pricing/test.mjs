@@ -42,6 +42,16 @@ test('normalizeConfig 填默认值并拒绝非法配置', () => {
   assert.equal(config.rules[0].timezone, 'Asia/Shanghai')
   assert.equal(config.rules[0].periods[0].days, undefined)
 
+  // provider 可省略，缺省为 '*'（匹配所有供应商）。
+  const noProvider = normalizeConfig({
+    rules: [{ model: 'm', periods: [{ start: '09:00', end: '18:00' }] }],
+  })
+  assert.equal(noProvider.rules[0].provider, '*')
+  assert.throws(
+    () => normalizeConfig({ rules: [{ provider: '  ', model: 'm', periods: [{ start: '09:00', end: '18:00' }] }] }),
+    /provider must be a non-empty string/,
+  )
+
   assert.throws(() => normalizeConfig(null), /config must be an object/)
   assert.throws(() => normalizeConfig({}), /rules must be an array/)
   assert.throws(
@@ -297,6 +307,8 @@ test('运行中进入高峰：询问一次，继续则调用 next；“不再提
     ctx.userQuestions.ask = async (request) => {
       asks += 1
       assert.equal(request.questions[0].options.length, 3)
+      assert.match(request.questions[0].detail, /UTC/, '时段文案应包含规则时区')
+      assert.doesNotMatch(request.questions[0].detail, /undefined/, '时段文案不得出现 undefined')
       return { answers: [{ id: request.questions[0].id, selected: ['本次高峰不再提醒'] }] }
     }
     const dispose = plugin.apply(ctx)

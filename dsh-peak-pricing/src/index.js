@@ -273,7 +273,7 @@ function withPromptGate(tails, agentId, task) {
 function periodDetail(peak) {
   const lines = [
     `模型：${peak.provider === '' ? peak.model : `${peak.provider}/${peak.model}`}`,
-    `时段：${periodLabel(peak.period)}（${peak.timezone}，${daysLabel(peak.period.days)}）`,
+    `时段：${periodLabel(peak.period)}（${peak.timeZone ?? '未知时区'}，${daysLabel(peak.period.days)}）`,
   ]
   return lines.join('\n')
 }
