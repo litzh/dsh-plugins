@@ -1,0 +1,36 @@
+{
+  "name": "dsh-peak-pricing",
+  "version": "0.1.0",
+  "description": "DSH 插件：按供应商/模型与星期配置高峰时段；高峰期提交与长任务工具调用前在对话窗口提问确认，可继续 / 本次高峰不再提醒 / 暂停任务",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "build": "node build-client.mjs",
+    "test": "node test.mjs && node test-client.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-model-selection"
+      ]
+    }
+  },
+  "license": "MIT"
+}

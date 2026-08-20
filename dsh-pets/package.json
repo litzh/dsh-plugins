@@ -1,0 +1,39 @@
+{
+  "name": "dsh-pets",
+  "version": "0.1.0",
+  "description": "DSH 桌面宠物插件：在 Web GUI 内显示一个可拖拽的像素宠物（移植自 codex 桌面宠物 guga），并在设置里提供宠物管理子菜单",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "src",
+    "pets",
+    "cordis.patch.yml",
+    "build-client.mjs",
+    "NOTICE",
+    "LICENSE-APACHE"
+  ],
+  "scripts": {
+    "build": "node build-client.mjs"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "license": "MIT"
+}
