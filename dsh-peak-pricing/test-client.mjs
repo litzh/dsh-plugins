@@ -126,7 +126,7 @@ async function bootController() {
     },
   }
 
-  let registeredSlot = null
+  let registeredSlots = []
   const ctx = {
     get(name) {
       if (name === 'modelDirectories') {
@@ -154,7 +154,7 @@ async function bootController() {
         return () => {}
       },
       register(options) {
-        registeredSlot = { options }
+        registeredSlots.push({ options })
         return () => {}
       },
     },
@@ -257,7 +257,8 @@ async function bootController() {
     ctx,
     shell,
     document,
-    registeredSlot,
+    registeredSlots,
+    registeredSlot: registeredSlots.find(slot => slot.options.name === 'shell.overlay'),
     dispose,
     submitConfirmCalls,
     getSubmitted: () => submitted,
@@ -268,6 +269,9 @@ async function bootController() {
 test('提交确认走对话窗口 host 提问：defer 不提交，continue 调用原始 submit', async () => {
   const harness = await bootController()
   try {
+    const settingsSlot = harness.registeredSlots.find(slot => slot.options.name === 'settings.section')
+    assert.equal(settingsSlot?.options.id, 'peak-pricing', '应注册「高峰计价」设置页')
+
     const inject = harness.registeredSlot.options.inject()
     const store = inject.store
 

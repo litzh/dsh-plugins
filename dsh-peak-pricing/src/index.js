@@ -2,8 +2,9 @@
  * dsh-peak-pricing · host 半区。
  *
  * 职责：
- *   1. 读取 ~/.dsh/peak-pricing.json（遵循 $DSH_HOME）并注册查询接口：
- *      GET /__dsh-peak-pricing/config —— 返回归一化后的高峰期定义。
+ *   1. 读取 ~/.dsh/peak-pricing.json（遵循 $DSH_HOME）并注册配置接口：
+ *      GET  /__dsh-peak-pricing/config —— 返回归一化后的高峰期定义；
+ *      POST /__dsh-peak-pricing/config —— 校验并原子保存整份配置（设置页用）。
  *   2. 提供 POST /__dsh-peak-pricing/submit-confirm：浏览器端在提交前
  *      调用此接口，由 host 通过 ctx.userQuestions 在当前会话的对话窗口
  *      中提问（继续提交 / 暂不开始），替代浏览器自定义模态弹窗。
@@ -13,7 +14,8 @@
  *      路由），仅在还没有 request/header 时才回退到 agent.options。
  *      若进入高峰，则通过 `ctx.userQuestions` 在 Web GUI 弹出选择：
  *        继续执行 / 本次高峰不再提醒 / 暂停任务。
- *      超时（promptTimeoutSeconds > 0）自动继续；暂停通过返回一个带
+ *      超时（promptTimeoutSeconds > 0）自动继续；开启 autoContinueOnPeakEnd
+ *      后，等待期间离开高峰也会自动继续。暂停通过返回一个带
  *      additionalContexts 的错误工具结果自然停止当前 turn，不 abort，
  *      现场（会话日志、inbox、草稿）完整保留，用户发新消息后继续。
  *
@@ -21,7 +23,7 @@
  */
 import { promises as fs } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import {
   daysLabel,
   defaultTimeZone,
@@ -47,6 +49,14 @@ const OPT_SUBMIT = '继续提交'
 const OPT_DEFER = '暂不开始'
 
 const EMPTY_CONFIG = normalizeConfig({ rules: [] }, defaultTimeZone())
+
+/**
+ * 测试挂钩：自动继续轮询间隔（毫秒）。运行时保持默认即可，
+ * 测试里可调小以快速触发“高峰结束自动继续”。
+ */
+export const internals = {
+  autoContinuePollMs: 15_000,
+}
 
 /* ------------------------------------------------------------------ */
 /* 配置文件路径与读取                                                  */
@@ -181,10 +191,47 @@ async function handleConfigRoute(res) {
       rules: config.rules,
       remindIntervalMinutes: config.remindIntervalMinutes,
       promptTimeoutSeconds: config.promptTimeoutSeconds,
+      autoContinueOnPeakEnd: config.autoContinueOnPeakEnd,
     })
   } catch (error) {
     sendJson(res, 500, { ok: false, error: error.message })
   }
+}
+
+/**
+ * 保存配置（设置页用）：整份替换，先经 normalizeConfig 校验，
+ * 再原子写入（临时文件 + rename），失败时磁盘上的旧配置保持原样。
+ * 写入的是归一化结果：缺省字段被显式补齐，未知字段被丢弃。
+ */
+async function handleSaveConfigRoute(req, res) {
+  let payload
+  try {
+    payload = await readJsonBody(req, 128 * 1024)
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error.message })
+    return
+  }
+  let config
+  try {
+    config = normalizeConfig(payload, defaultTimeZone())
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error.message })
+    return
+  }
+  const path = configPath()
+  const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`
+  try {
+    await fs.mkdir(dirname(path), { recursive: true })
+    await fs.writeFile(tmpPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8')
+    await fs.rename(tmpPath, path)
+  } catch (error) {
+    await fs.rm(tmpPath, { force: true }).catch(() => {})
+    sendJson(res, 500, { ok: false, error: `failed to write config: ${error.message}` })
+    return
+  }
+  // 让下一次 runtimeConfig 立即重读（mtime 已变，这里主动清缓存更直接）。
+  runtimeCache = null
+  sendJson(res, 200, { ok: true, path })
 }
 
 /* ------------------------------------------------------------------ */
@@ -284,12 +331,17 @@ function timeoutLine(timeoutSeconds) {
     : '请选择后续操作；不选择会一直等待。'
 }
 
-function runQuestion(agent, peak, timeoutSeconds) {
+function autoContinueLine(enabled) {
+  return enabled ? '若在等待期间离开高峰时段，将自动继续。' : null
+}
+
+function runQuestion(agent, peak, timeoutSeconds, autoContinue) {
   return {
     id: 'peak-pricing-run',
     header: '高峰计价提醒',
     question: `${modelLabel(agent)} 已进入高峰时段，是否继续执行？`,
-    detail: [periodDetail(peak), timeoutLine(timeoutSeconds)].join('\n'),
+    detail: [periodDetail(peak), timeoutLine(timeoutSeconds), autoContinueLine(autoContinue)]
+      .filter(line => line !== null).join('\n'),
     options: [
       {
         label: OPT_CONTINUE,
@@ -307,12 +359,13 @@ function runQuestion(agent, peak, timeoutSeconds) {
   }
 }
 
-function submitQuestion(agent, peak, timeoutSeconds) {
+function submitQuestion(agent, peak, timeoutSeconds, autoContinue) {
   return {
     id: 'peak-pricing-submit',
     header: '高峰计价提醒',
     question: `${modelLabel(agent)} 正处于高峰计价时段，是否继续提交？`,
-    detail: [periodDetail(peak), timeoutLine(timeoutSeconds)].join('\n'),
+    detail: [periodDetail(peak), timeoutLine(timeoutSeconds), autoContinueLine(autoContinue)]
+      .filter(line => line !== null).join('\n'),
     options: [
       {
         label: OPT_SUBMIT,
@@ -335,13 +388,17 @@ function parseAnswer(answer) {
 }
 
 /**
- * 通过 ctx.userQuestions 提问，等待用户选择或超时。
+ * 通过 ctx.userQuestions 提问，等待用户选择、超时，或（可选）高峰结束后自动继续。
+ * @param autoContinueCheck - 可选；返回「是否仍处于高峰」的异步检查。
+ *   提供后按 internals.autoContinuePollMs 轮询，离开高峰即取消提问并继续。
  * @returns {Promise<{kind: 'continue'|'pause'|'suppress'|'defer', reason?: string}>}
  */
-async function askPeakQuestion(ctx, agent, question, timeoutSeconds, callerSignal) {
+async function askPeakQuestion(ctx, agent, question, timeoutSeconds, callerSignal, autoContinueCheck) {
   const controller = new AbortController()
   let timedOut = false
+  let peakEnded = false
   let timer = null
+  let poller = null
 
   const onCallerAbort = () => {
     controller.abort(callerSignal?.reason instanceof Error
@@ -358,12 +415,36 @@ async function askPeakQuestion(ctx, agent, question, timeoutSeconds, callerSigna
     }, timeoutSeconds * 1000)
   }
 
+  if (typeof autoContinueCheck === 'function') {
+    let checking = false
+    poller = setInterval(() => {
+      if (checking || controller.signal.aborted) return
+      checking = true
+      void Promise.resolve()
+        .then(autoContinueCheck)
+        .then((stillPeak) => {
+          if (stillPeak === false && !peakEnded) {
+            peakEnded = true
+            controller.abort(new Error('peak-pricing auto-continue: peak window ended'))
+          }
+        })
+        .catch(() => {
+          // 检查失败（如配置临时损坏）：保持等待，下一轮再试。
+        })
+        .finally(() => {
+          checking = false
+        })
+    }, internals.autoContinuePollMs)
+    poller.unref?.()
+  }
+
   try {
     const answer = await ctx.userQuestions.ask({
       agent,
       signal: controller.signal,
       questions: [question],
     })
+    if (peakEnded) return { kind: 'continue', reason: 'peak-ended' }
     if (timedOut) return { kind: 'continue', reason: 'timeout' }
     const { selected, custom } = parseAnswer(answer)
     if (question.id === 'peak-pricing-submit') {
@@ -374,11 +455,14 @@ async function askPeakQuestion(ctx, agent, question, timeoutSeconds, callerSigna
     if (selected === OPT_SUPPRESS || custom.includes('不再提醒')) return { kind: 'suppress' }
     return { kind: 'continue' }
   } catch (error) {
+    // 高峰结束自动继续优先于其它取消原因。
+    if (peakEnded) return { kind: 'continue', reason: 'peak-ended' }
     // 取消、provider 缺失或其它 UI 故障：宁可继续，也不悄悄挂起提交/工具调用。
     if (timedOut) return { kind: 'continue', reason: 'timeout' }
     return { kind: 'continue', reason: error instanceof Error ? error.message : String(error) }
   } finally {
     if (timer !== null) clearTimeout(timer)
+    if (poller !== null) clearInterval(poller)
     callerSignal?.removeEventListener('abort', onCallerAbort)
   }
 }
@@ -428,6 +512,12 @@ async function handleSubmitConfirmRoute(ctx, req, res) {
   }
 
   const timeoutSeconds = Math.max(0, config.promptTimeoutSeconds || 0)
+  const autoContinue = config.autoContinueOnPeakEnd === true
+    ? async () => {
+      const latest = await runtimeConfig()
+      return peakStateAt(latest.rules, provider, model, new Date()).peak === true
+    }
+    : undefined
   const requestController = new AbortController()
   const onClientAbort = () => {
     requestController.abort(new Error('peak-pricing submit confirmation cancelled: client disconnected'))
@@ -439,9 +529,10 @@ async function handleSubmitConfirmRoute(ctx, req, res) {
     decision = await askPeakQuestion(
       ctx,
       agent,
-      submitQuestion(agent, peak, timeoutSeconds),
+      submitQuestion(agent, peak, timeoutSeconds, config.autoContinueOnPeakEnd === true),
       timeoutSeconds,
       requestController.signal,
+      autoContinue,
     )
   } finally {
     req.removeListener?.('aborted', onClientAbort)
@@ -482,12 +573,20 @@ async function decideForToolCall(ctx, exec, states, tails) {
   }
 
   const timeoutSeconds = Math.max(0, config.promptTimeoutSeconds || 0)
+  const autoContinue = config.autoContinueOnPeakEnd === true
+    ? async () => {
+      const latest = await runtimeConfig()
+      const latestRoute = agentRoute(agent)
+      return peakStateAt(latest.rules, latestRoute.provider, latestRoute.model, new Date()).peak === true
+    }
+    : undefined
   const answer = await askPeakQuestion(
     ctx,
     agent,
-    runQuestion(agent, peak, timeoutSeconds),
+    runQuestion(agent, peak, timeoutSeconds, config.autoContinueOnPeakEnd === true),
     timeoutSeconds,
     exec.signal,
+    autoContinue,
   )
   if (answer.kind === 'pause') {
     state.paused = true
@@ -556,12 +655,16 @@ export function apply(ctx) {
       }
       try {
         if (pathname === ROUTE_CONFIG) {
-          if (req.method !== 'GET' && req.method !== 'HEAD') {
-            res.writeHead(405)
-            res.end()
+          if (req.method === 'GET' || req.method === 'HEAD') {
+            await handleConfigRoute(res)
             return
           }
-          await handleConfigRoute(res)
+          if (req.method === 'POST') {
+            await handleSaveConfigRoute(req, res)
+            return
+          }
+          res.writeHead(405)
+          res.end()
           return
         }
         if (pathname === ROUTE_SUBMIT_CONFIRM) {

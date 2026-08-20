@@ -261,6 +261,8 @@ export function normalizeConfig(input, fallbackTimeZone) {
     input.remindIntervalMinutes, 15, 'remindIntervalMinutes')
   const promptTimeoutSeconds = normalizeNonNegativeNumber(
     input.promptTimeoutSeconds, 0, 'promptTimeoutSeconds')
+  const autoContinueOnPeakEnd = normalizeBoolean(
+    input.autoContinueOnPeakEnd, false, 'autoContinueOnPeakEnd')
 
   const rules = input.rules.map((rule, ruleIndex) => {
     const where = `rules[${ruleIndex}]`
@@ -328,7 +330,15 @@ export function normalizeConfig(input, fallbackTimeZone) {
     }
   })
 
-  return { rules, remindIntervalMinutes, promptTimeoutSeconds }
+  return { rules, remindIntervalMinutes, promptTimeoutSeconds, autoContinueOnPeakEnd }
+}
+
+function normalizeBoolean(value, fallback, name) {
+  if (value === undefined) return fallback
+  if (typeof value !== 'boolean') {
+    throw new TypeError(`peak-pricing config.${name} must be a boolean`)
+  }
+  return value
 }
 
 function normalizeNonNegativeNumber(value, fallback, name) {

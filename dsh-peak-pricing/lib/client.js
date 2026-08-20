@@ -268,6 +268,8 @@ function normalizeConfig(input, fallbackTimeZone) {
     input.remindIntervalMinutes, 15, 'remindIntervalMinutes')
   const promptTimeoutSeconds = normalizeNonNegativeNumber(
     input.promptTimeoutSeconds, 0, 'promptTimeoutSeconds')
+  const autoContinueOnPeakEnd = normalizeBoolean(
+    input.autoContinueOnPeakEnd, false, 'autoContinueOnPeakEnd')
 
   const rules = input.rules.map((rule, ruleIndex) => {
     const where = `rules[${ruleIndex}]`
@@ -335,7 +337,15 @@ function normalizeConfig(input, fallbackTimeZone) {
     }
   })
 
-  return { rules, remindIntervalMinutes, promptTimeoutSeconds }
+  return { rules, remindIntervalMinutes, promptTimeoutSeconds, autoContinueOnPeakEnd }
+}
+
+function normalizeBoolean(value, fallback, name) {
+  if (value === undefined) return fallback
+  if (typeof value !== 'boolean') {
+    throw new TypeError(`peak-pricing config.${name} must be a boolean`)
+  }
+  return value
 }
 
 function normalizeNonNegativeNumber(value, fallback, name) {
@@ -378,6 +388,8 @@ function daysLabel(days) {
  *   - 拦截当前会话 InputShell.submit：高峰提交时调用 host 的
  *     /__dsh-peak-pricing/submit-confirm，由 ctx.userQuestions 在对话窗口
  *     中提问；选择“暂不开始”则不调用原 submit，草稿自然留在输入框。
+ *   - 注册 settings.section「高峰计价」设置页：可视化编辑规则与全局
+ *     选项，POST /__dsh-peak-pricing/config 整份保存（host 校验后原子写入）。
  * ========================================================================= */
 
 const CONFIG_URL = "/__dsh-peak-pricing/config";
@@ -806,6 +818,7 @@ function createController(ctx) {
   const api = {
     store,
     clearNotice,
+    refreshConfig,
   };
 
   return {
@@ -815,6 +828,297 @@ function createController(ctx) {
     dispose,
     recompute,
   };
+}
+
+/* ---- 设置页：可视化编辑 ~/.dsh/peak-pricing.json ----
+ * 注册为 settings.section 的一页（id=peak-pricing，label=高峰计价）。
+ * 草稿从 GET /config 的归一化结果初始化；保存时整份 POST 回 host，
+ * 由 host 用 normalizeConfig 校验并原子写入磁盘。 */
+
+const DAY_LABELS = ["日", "一", "二", "三", "四", "五", "六"]; // 与 DAY_CODES 对齐
+
+/** 归一化配置 → 表单草稿（数值转字符串，provider '*' 显示为空）。 */
+function draftFromConfig(config) {
+  return {
+    remindIntervalMinutes: String(config.remindIntervalMinutes ?? 15),
+    promptTimeoutSeconds: String(config.promptTimeoutSeconds ?? 0),
+    autoContinueOnPeakEnd: config.autoContinueOnPeakEnd === true,
+    rules: (config.rules ?? []).map(rule => ({
+      provider: rule.provider === "*" ? "" : String(rule.provider ?? ""),
+      model: String(rule.model ?? ""),
+      timezone: String(rule.timezone ?? ""),
+      periods: (rule.periods ?? []).map(period => ({
+        days: period.days === undefined ? [...DAY_CODES] : [...period.days],
+        start: String(period.start ?? ""),
+        end: String(period.end ?? ""),
+      })),
+    })),
+  };
+}
+
+/** 表单草稿 → 提交载荷；字段级非法输入抛出带中文信息的 Error。 */
+function payloadFromDraft(draft) {
+  const readNumber = (raw, label) => {
+    const value = Number(raw)
+    if (!Number.isFinite(value) || value < 0 || !Number.isInteger(value)) {
+      throw new Error(`${label}必须是非负整数`);
+    }
+    return value;
+  };
+  return {
+    rules: draft.rules.map((rule, ruleIndex) => {
+      const where = `规则 ${ruleIndex + 1}`;
+      if (rule.model.trim() === "") throw new Error(`${where}：模型模式不能为空`);
+      return {
+        ...(rule.provider.trim() === "" ? {} : { provider: rule.provider.trim() }),
+        model: rule.model.trim(),
+        ...(rule.timezone.trim() === "" ? {} : { timezone: rule.timezone.trim() }),
+        periods: rule.periods.map((period, periodIndex) => {
+          const periodWhere = `${where} 时段 ${periodIndex + 1}`;
+          if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(period.start) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(period.end)) {
+            throw new Error(`${periodWhere}：起止时间必须是 HH:mm`);
+          }
+          return {
+            ...(period.days.length === DAY_CODES.length ? {} : { days: [...period.days] }),
+            start: period.start,
+            end: period.end,
+          };
+        }),
+      };
+    }),
+    remindIntervalMinutes: readNumber(draft.remindIntervalMinutes, "运行中提醒间隔"),
+    promptTimeoutSeconds: readNumber(draft.promptTimeoutSeconds, "提问超时"),
+    autoContinueOnPeakEnd: draft.autoContinueOnPeakEnd,
+  };
+}
+
+function PeakPricingSettings(props) {
+  const { controller } = props;
+  const { useState } = react;
+  const snapshot = useSyncExternalStore(
+    fn => controller.store.subscribe(fn),
+    () => controller.store.getSnapshot(),
+  );
+  const [draft, setDraft] = useState(null);
+  const [status, setStatus] = useState({ kind: "idle", text: "" });
+
+  // 配置就绪后用磁盘上的归一化结果初始化草稿（仅首次；之后用户自行「重载」）。
+  if (draft === null && snapshot.configState === "ready") {
+    setDraft(draftFromConfig(snapshot.config));
+  }
+
+  const patch = (changes) => setDraft(current => ({ ...current, ...changes }));
+  const patchRule = (index, changes) => setDraft(current => ({
+    ...current,
+    rules: current.rules.map((rule, at) => at === index ? { ...rule, ...changes } : rule),
+  }));
+  const patchPeriod = (ruleIndex, periodIndex, changes) => setDraft(current => ({
+    ...current,
+    rules: current.rules.map((rule, at) => at !== ruleIndex ? rule : {
+      ...rule,
+      periods: rule.periods.map((period, at2) => at2 === periodIndex ? { ...period, ...changes } : period),
+    }),
+  }));
+
+  async function save() {
+    let payload;
+    try {
+      payload = payloadFromDraft(draft);
+    } catch (error) {
+      setStatus({ kind: "error", text: error.message });
+      return;
+    }
+    setStatus({ kind: "saving", text: "保存中…" });
+    try {
+      const response = await fetch(CONFIG_URL, {
+        method: "POST",
+        headers: { accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify(payload),
+        cache: "no-store",
+      });
+      const wire = await response.json().catch(() => null);
+      if (!response.ok || wire?.ok !== true) {
+        throw new Error(wire?.error ?? `HTTP ${response.status}`);
+      }
+      await controller.api.refreshConfig();
+      setStatus({ kind: "ok", text: `已保存到 ${wire.path}` });
+    } catch (error) {
+      setStatus({ kind: "error", text: `保存失败：${error.message}` });
+    }
+  }
+
+  function reload() {
+    setDraft(draftFromConfig(controller.store.getSnapshot().config));
+    setStatus({ kind: "idle", text: "" });
+  }
+
+  const field = (labelText, input, hint) => h("label", { className: "dshpp-field" },
+    h("span", { className: "dshpp-field-label" }, labelText),
+    input,
+    hint === undefined ? null : h("span", { className: "dshpp-field-hint" }, hint),
+  );
+
+  const textInput = (value, placeholder, onChange) => h("input", {
+    className: "dshpp-input",
+    type: "text",
+    value,
+    placeholder,
+    onChange: event => onChange(event.target.value),
+  });
+
+  if (snapshot.configState === "error") {
+    return h("div", { className: "dshpp-settings" },
+      h("p", { className: "dshpp-status-error" },
+        `配置读取失败：${snapshot.configError ?? "unknown"}`),
+      h("button", {
+        className: "dshpp-button",
+        type: "button",
+        onClick: () => void controller.api.refreshConfig(),
+      }, "重试"),
+    );
+  }
+  if (draft === null) {
+    return h("div", { className: "dshpp-settings" }, h("p", { className: "dshpp-hint" }, "配置加载中…"));
+  }
+
+  return h("div", { className: "dshpp-settings" },
+    h("p", { className: "dshpp-hint" },
+      "按顺序匹配规则；命中活跃时段即视为高峰。保存后立即生效，无需重启。配置文件也可手动编辑：",
+      h("code", null, "~/.dsh/peak-pricing.json"),
+    ),
+
+    h("h3", { className: "dshpp-heading" }, "全局选项"),
+    field("运行中提醒间隔（分钟）", textInput(
+      draft.remindIntervalMinutes, "15",
+      value => patch({ remindIntervalMinutes: value }),
+    ), "长任务中选择「继续执行」后，间隔该时长再次确认；0 表示每个工具调用都询问。"),
+    field("提问超时（秒）", textInput(
+      draft.promptTimeoutSeconds, "0",
+      value => patch({ promptTimeoutSeconds: value }),
+    ), "0 表示一直等待；大于 0 时无响应 N 秒后自动继续。"),
+    h("label", { className: "dshpp-field dshpp-field-inline" },
+      h("input", {
+        type: "checkbox",
+        checked: draft.autoContinueOnPeakEnd,
+        onChange: event => patch({ autoContinueOnPeakEnd: event.target.checked }),
+      }),
+      h("span", null, "高峰结束后自动继续"),
+    ),
+    h("p", { className: "dshpp-field-hint" },
+      "提问等待期间若离开高峰时段（或规则被改后不再命中），自动按「继续」处理，适合人不在电脑前的场景。"),
+
+    h("h3", { className: "dshpp-heading" }, "高峰规则"),
+    draft.rules.length === 0
+      ? h("p", { className: "dshpp-hint" }, "暂无规则，点击下方「添加规则」。")
+      : null,
+    ...draft.rules.map((rule, ruleIndex) => h("div", { className: "dshpp-rule", key: ruleIndex },
+      h("div", { className: "dshpp-rule-head" },
+        h("span", { className: "dshpp-rule-title" }, `规则 ${ruleIndex + 1}`),
+        h("button", {
+          className: "dshpp-button dshpp-button-danger",
+          type: "button",
+          onClick: () => setDraft(current => ({
+            ...current,
+            rules: current.rules.filter((_, at) => at !== ruleIndex),
+          })),
+        }, "删除规则"),
+      ),
+      field("供应商（可留空）", textInput(
+        rule.provider, "留空匹配所有供应商，如 deepseek-official",
+        value => patchRule(ruleIndex, { provider: value }),
+      )),
+      field("模型模式", textInput(
+        rule.model, "支持 * ? 通配，如 deepseek-* 或 deepseek/deepseek-*",
+        value => patchRule(ruleIndex, { model: value }),
+      )),
+      field("时区（可留空）", textInput(
+        rule.timezone, "IANA 时区，如 Asia/Shanghai；留空用本机时区",
+        value => patchRule(ruleIndex, { timezone: value }),
+      )),
+      h("div", { className: "dshpp-periods" },
+        h("span", { className: "dshpp-field-label" }, "时段"),
+        ...rule.periods.map((period, periodIndex) => h("div", { className: "dshpp-period", key: periodIndex },
+          h("div", { className: "dshpp-days" },
+            DAY_CODES.map((code, dayIndex) => h("label", {
+              className: period.days.includes(code) ? "dshpp-day dshpp-day-on" : "dshpp-day",
+              key: code,
+            },
+              h("input", {
+                type: "checkbox",
+                checked: period.days.includes(code),
+                onChange: () => {
+                  const days = period.days.includes(code)
+                    ? period.days.filter(day => day !== code)
+                    : DAY_CODES.filter(day => day === code || period.days.includes(day));
+                  patchPeriod(ruleIndex, periodIndex, { days });
+                },
+              }),
+              DAY_LABELS[dayIndex],
+            )),
+          ),
+          h("input", {
+            className: "dshpp-input dshpp-time",
+            type: "text",
+            value: period.start,
+            placeholder: "09:00",
+            onChange: event => patchPeriod(ruleIndex, periodIndex, { start: event.target.value }),
+          }),
+          h("span", { className: "dshpp-period-sep" }, "至"),
+          h("input", {
+            className: "dshpp-input dshpp-time",
+            type: "text",
+            value: period.end,
+            placeholder: "18:00",
+            onChange: event => patchPeriod(ruleIndex, periodIndex, { end: event.target.value }),
+          }),
+          h("button", {
+            className: "dshpp-button",
+            type: "button",
+            onClick: () => patchRule(ruleIndex, {
+              periods: rule.periods.filter((_, at) => at !== periodIndex),
+            }),
+          }, "删除"),
+        )),
+        h("button", {
+          className: "dshpp-button",
+          type: "button",
+          onClick: () => patchRule(ruleIndex, {
+            periods: [...rule.periods, { days: [...DAY_CODES], start: "09:00", end: "18:00" }],
+          }),
+        }, "添加时段"),
+        h("p", { className: "dshpp-field-hint" },
+          "星期全选即每天；开始=结束表示全天；开始>结束表示跨午夜；一个都不选表示该时段不生效。"),
+      ),
+    )),
+    h("button", {
+      className: "dshpp-button",
+      type: "button",
+      onClick: () => setDraft(current => ({
+        ...current,
+        rules: [...current.rules, {
+          provider: "", model: "", timezone: "",
+          periods: [{ days: [...DAY_CODES], start: "09:00", end: "18:00" }],
+        }],
+      })),
+    }, "添加规则"),
+
+    h("div", { className: "dshpp-actions" },
+      h("button", {
+        className: "dshpp-button dshpp-button-primary",
+        type: "button",
+        disabled: status.kind === "saving",
+        onClick: () => void save(),
+      }, status.kind === "saving" ? "保存中…" : "保存"),
+      h("button", {
+        className: "dshpp-button",
+        type: "button",
+        onClick: reload,
+      }, "重载"),
+      status.text === "" ? null : h("span", {
+        className: status.kind === "error" ? "dshpp-status-error" : "dshpp-status-ok",
+      }, status.text),
+    ),
+  );
 }
 
 /* ---- 进入/离开高峰的临时通知 ----
@@ -860,6 +1164,35 @@ body.dshpp-peak [data-composer-card] button[aria-haspopup="menu"]{color:var(--ds
 .dshpp-notice{pointer-events:auto;max-width:340px;padding:8px 11px;border-radius:10px;font-size:12px;line-height:1.45;border:1px solid rgba(255,255,255,.14);background:rgba(22,27,34,.95);color:var(--dsw-alias-text-primary,#e6edf3);box-shadow:0 8px 28px rgba(0,0,0,.35);}
 .dshpp-notice-peak{border-color:rgba(255,160,80,.55);}
 .dshpp-notice-off{border-color:rgba(90,220,140,.5);}
+.dshpp-settings{display:flex;flex-direction:column;gap:12px;max-width:640px;color:var(--dsw-alias-label-primary,#e6edf3);font-size:13px;line-height:1.5;}
+.dshpp-heading{margin:8px 0 0;font-size:14px;font-weight:600;color:var(--dsw-alias-label-primary,#e6edf3);}
+.dshpp-hint{margin:0;font-size:12px;color:var(--dsw-alias-label-tertiary,#8b949e);}
+.dshpp-hint code{font-family:var(--dsw-font-family-mono,monospace);font-size:11px;}
+.dshpp-field{display:flex;flex-direction:column;gap:4px;}
+.dshpp-field-inline{flex-direction:row;align-items:center;gap:8px;}
+.dshpp-field-label{font-size:12px;color:var(--dsw-alias-label-secondary,#9aa4b2);}
+.dshpp-field-hint{margin:0;font-size:11px;color:var(--dsw-alias-label-tertiary,#8b949e);}
+.dshpp-input{box-sizing:border-box;max-width:320px;padding:6px 8px;border:1px solid var(--dsw-alias-border-l1,#30363d);border-radius:8px;background:var(--dsw-alias-bg-layer-1,transparent);color:inherit;font:inherit;}
+.dshpp-input:focus{outline:none;border-color:var(--dsw-alias-border-l3,#4a525c);}
+.dshpp-time{max-width:88px;text-align:center;}
+.dshpp-rule{display:flex;flex-direction:column;gap:10px;padding:12px;border:1px solid var(--dsw-alias-border-l1,#30363d);border-radius:10px;}
+.dshpp-rule-head{display:flex;align-items:center;justify-content:space-between;}
+.dshpp-rule-title{font-weight:600;}
+.dshpp-periods{display:flex;flex-direction:column;gap:8px;align-items:flex-start;}
+.dshpp-period{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.dshpp-days{display:flex;gap:4px;}
+.dshpp-day{display:inline-flex;align-items:center;gap:2px;padding:2px 6px;border:1px solid var(--dsw-alias-border-l1,#30363d);border-radius:6px;font-size:12px;cursor:pointer;color:var(--dsw-alias-label-tertiary,#8b949e);user-select:none;}
+.dshpp-day input{display:none;}
+.dshpp-day-on{color:var(--dsw-alias-label-primary,#e6edf3);border-color:var(--dsw-alias-border-l3,#4a525c);background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.06));}
+.dshpp-period-sep{color:var(--dsw-alias-label-tertiary,#8b949e);}
+.dshpp-button{padding:6px 12px;border:1px solid var(--dsw-alias-border-l1,#30363d);border-radius:8px;background:transparent;color:inherit;font:inherit;cursor:pointer;width:fit-content;}
+.dshpp-button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.06));}
+.dshpp-button:disabled{opacity:.6;cursor:default;}
+.dshpp-button-primary{border-color:var(--dsw-alias-border-l3,#4a525c);background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));font-weight:600;}
+.dshpp-button-danger{color:var(--dsw-alias-state-error-primary,#f0883e);}
+.dshpp-actions{display:flex;align-items:center;gap:10px;margin-top:4px;}
+.dshpp-status-ok{font-size:12px;color:var(--dsw-alias-state-success-label,#3fb950);}
+.dshpp-status-error{font-size:12px;color:var(--dsw-alias-state-error-primary,#f0883e);}
 `;
 function injectCss() {
   if (typeof document === "undefined") return;
@@ -895,6 +1228,14 @@ function apply(ctx) {
     ),
   );
 
+  // 设置面板里的「高峰计价」页：可视化编辑配置，保存即生效。
+  const disposeSettings = ctx.slots.inject("settings.section", () =>
+    ctx.slots.register(
+      { name: "settings.section", id: "peak-pricing", order: 90, label: "高峰计价" },
+      props => h(PeakPricingSettings, { ...props, controller }),
+    ),
+  );
+
   // InputBar 可能在插件 apply 之后才创建 shell；稍后补一次补丁。
   const patchTimer = setTimeout(() => {
     const sessionId = ctx.sessions.list.getSnapshot().current ?? null;
@@ -907,6 +1248,7 @@ function apply(ctx) {
   return () => {
     clearTimeout(patchTimer);
     disposeSlot();
+    disposeSettings();
     controller.dispose();
   };
 }

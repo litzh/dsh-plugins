@@ -2,7 +2,7 @@
 //   1. 高峰时段纯逻辑（通配符、时区、跨午夜、星期过滤、全天）；
 //   2. host 半区接口与 tools/execute 拦截（mock Context，不依赖 DSH 进程）。
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
@@ -20,6 +20,7 @@ import {
 import * as plugin from './src/index.js'
 
 const utc = (value) => new Date(`${value}Z`)
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms))
 
 /* ------------------------------------------------------------------ */
 /* 纯调度逻辑                                                          */
@@ -47,9 +48,14 @@ test('normalizeConfig 填默认值并拒绝非法配置', () => {
     rules: [{ model: 'm', periods: [{ start: '09:00', end: '18:00' }] }],
   })
   assert.equal(noProvider.rules[0].provider, '*')
+  assert.equal(noProvider.autoContinueOnPeakEnd, false)
   assert.throws(
     () => normalizeConfig({ rules: [{ provider: '  ', model: 'm', periods: [{ start: '09:00', end: '18:00' }] }] }),
     /provider must be a non-empty string/,
+  )
+  assert.throws(
+    () => normalizeConfig({ rules: [], autoContinueOnPeakEnd: 'yes' }),
+    /autoContinueOnPeakEnd must be a boolean/,
   )
 
   assert.throws(() => normalizeConfig(null), /config must be an object/)
@@ -209,6 +215,24 @@ async function callConfigRoute(ctx) {
   return { status, body: JSON.parse(body) }
 }
 
+async function callSaveConfigRoute(ctx, payload) {
+  let body = ''
+  let status = 0
+  const req = Readable.from([JSON.stringify(payload)])
+  req.method = 'POST'
+  req.url = '/__dsh-peak-pricing/config'
+  const res = {
+    writeHead(code) {
+      status = code
+    },
+    end(chunk) {
+      body = typeof chunk === 'string' ? chunk : ''
+    },
+  }
+  await ctx.route.handler(req, res)
+  return { status, body: JSON.parse(body) }
+}
+
 async function callSubmitConfirmRoute(ctx, payload) {
   let body = ''
   let status = 0
@@ -260,6 +284,140 @@ test('host 提供配置查询接口，并返回归一化高峰期定义', async 
 
     dispose()
   } finally {
+    process.env.DSH_HOME = previousHome
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+
+test('POST /config 校验并原子保存整份配置', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-peak-pricing-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  try {
+    const ctx = createMockCts(mockAgent('save-agent'))
+    const dispose = plugin.apply(ctx)
+
+    // 非法配置：400，不落盘。
+    let response = await callSaveConfigRoute(ctx, { rules: [{ model: 'm', periods: [{ start: '9:00', end: '18:00' }] }] })
+    assert.equal(response.status, 400)
+    assert.match(response.body.error, /start must be "HH:mm"/)
+
+    // 合法配置：200，写入归一化结果（provider 缺省补 '*'），GET 立即可读。
+    response = await callSaveConfigRoute(ctx, {
+      rules: [{ model: 'deepseek/deepseek-*', timezone: 'Asia/Shanghai', periods: [{ start: '09:00', end: '12:00' }] }],
+      remindIntervalMinutes: 5,
+      autoContinueOnPeakEnd: true,
+    })
+    assert.equal(response.status, 200)
+    assert.equal(response.body.ok, true)
+    const onDisk = JSON.parse(await readFile(join(home, 'peak-pricing.json'), 'utf8'))
+    assert.equal(onDisk.rules[0].provider, '*')
+    assert.equal(onDisk.rules[0].timezone, 'Asia/Shanghai')
+    assert.equal(onDisk.autoContinueOnPeakEnd, true)
+    const query = await callConfigRoute(ctx)
+    assert.equal(query.body.rules[0].model, 'deepseek/deepseek-*')
+    assert.equal(query.body.autoContinueOnPeakEnd, true)
+
+    dispose()
+  } finally {
+    process.env.DSH_HOME = previousHome
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('autoContinueOnPeakEnd：提问等待期间离开高峰自动继续', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-peak-pricing-'))
+  const previousHome = process.env.DSH_HOME
+  const previousPoll = plugin.internals.autoContinuePollMs
+  process.env.DSH_HOME = home
+  plugin.internals.autoContinuePollMs = 20
+  try {
+    await writeFile(join(home, 'peak-pricing.json'), JSON.stringify({
+      rules: [{
+        provider: 'deepseek-official',
+        model: 'deepseek-chat',
+        timezone: 'UTC',
+        periods: [{ start: '00:00', end: '00:00' }],
+      }],
+      autoContinueOnPeakEnd: true,
+      promptTimeoutSeconds: 0,
+    }))
+
+    const agent = mockAgent('auto-continue-agent')
+    const ctx = createMockCts(agent)
+    let asks = 0
+    ctx.userQuestions.ask = ({ signal }) => {
+      asks += 1
+      return new Promise((_, reject) => {
+        if (signal.aborted) reject(signal.reason ?? new Error('aborted'))
+        else signal.addEventListener('abort', () => reject(signal.reason ?? new Error('aborted')))
+      })
+    }
+    const dispose = plugin.apply(ctx)
+    const listener = ctx.listeners.get('tools/execute')[0]
+    const exec = { parent: undefined, agent, signal: new AbortController().signal }
+
+    let nextCalls = 0
+    const pending = listener(exec, async () => { nextCalls += 1; return { isError: false, content: [] } })
+    await delay(80)
+    assert.equal(asks, 1, '高峰内应先提问')
+    assert.equal(nextCalls, 0, '提问期间不得执行工具')
+
+    // 用户不在时高峰结束（这里以规则被清空模拟）：提问被取消，自动继续。
+    await writeFile(join(home, 'peak-pricing.json'), JSON.stringify({ rules: [], autoContinueOnPeakEnd: true }))
+    await pending
+    assert.equal(nextCalls, 1, '离开高峰后应自动继续执行工具')
+
+    dispose()
+  } finally {
+    plugin.internals.autoContinuePollMs = previousPoll
+    process.env.DSH_HOME = previousHome
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('autoContinueOnPeakEnd 关闭时：离开高峰不干预，提问继续等待', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-peak-pricing-'))
+  const previousHome = process.env.DSH_HOME
+  const previousPoll = plugin.internals.autoContinuePollMs
+  process.env.DSH_HOME = home
+  plugin.internals.autoContinuePollMs = 20
+  try {
+    await writeFile(join(home, 'peak-pricing.json'), JSON.stringify({
+      rules: [{
+        provider: 'deepseek-official',
+        model: 'deepseek-chat',
+        timezone: 'UTC',
+        periods: [{ start: '00:00', end: '00:00' }],
+      }],
+      promptTimeoutSeconds: 0,
+    }))
+
+    const agent = mockAgent('no-auto-continue-agent')
+    const ctx = createMockCts(agent)
+    ctx.userQuestions.ask = async () => {
+      // 模拟用户稍后回来选择「继续执行」。
+      await delay(120)
+      return { answers: [{ id: 'peak-pricing-run', selected: ['继续执行'] }] }
+    }
+    const dispose = plugin.apply(ctx)
+    const listener = ctx.listeners.get('tools/execute')[0]
+    const exec = { parent: undefined, agent, signal: new AbortController().signal }
+
+    let nextCalls = 0
+    const pending = listener(exec, async () => { nextCalls += 1; return { isError: false, content: [] } })
+    await delay(40)
+    await writeFile(join(home, 'peak-pricing.json'), JSON.stringify({ rules: [] }))
+    await pending
+    assert.equal(nextCalls, 1, '用户选择继续后正常执行')
+    // 再触发一次：离开高峰后不再提问。
+    await listener(exec, async () => { nextCalls += 1; return { isError: false, content: [] } })
+    assert.equal(nextCalls, 2)
+
+    dispose()
+  } finally {
+    plugin.internals.autoContinuePollMs = previousPoll
     process.env.DSH_HOME = previousHome
     await rm(home, { recursive: true, force: true })
   }
