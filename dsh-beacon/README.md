@@ -1,6 +1,6 @@
 # dsh-beacon
 
-将 DSH 的运行状态上报到 beacon 监控面板（移植自 pi 扩展 `beacon.ts`）。
+将 DSH 的运行状态上报到 [beacon](https://github.com/litzh/beacon) 监控面板（移植自 pi 扩展 `beacon.ts`）。
 
 ## 上报内容
 
