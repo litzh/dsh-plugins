@@ -1,0 +1,29 @@
+{
+  "name": "dsh-beacon",
+  "version": "0.2.0",
+  "description": "DSH 运行状态上报到 beacon 监控面板：进程/会话生命周期、任务开始/完成、危险命令、工具失败、等待确认（可 ACK）、异常与心跳",
+  "type": "module",
+  "exports": {
+    ".": "./lib/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "test": "node test.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  }
+}
