@@ -14,7 +14,7 @@
 | 危险命令执行前（`rm -rf`、`sudo`、`git push`、`kubectl apply` 等） | warning |
 | 工具执行失败 | warning |
 | 弹出提示等待确认（工具审批 `approval/asked`、模型提问 `ask_user_question`） | action_required（处理完后自动 ACK） |
-| agent 执行异常 | critical |
+| agent 执行异常（如模型报错，无需确认，不闪烁） | warning |
 
 上报失败（beacon 未运行、网络异常）一律静默，不影响会话。多会话场景下每条事件带 hostname 与会话 cwd。进程异常崩溃时无法自我上报，靠心跳 TTL 过期发现。
 

@@ -104,11 +104,12 @@ assert(posted.length === 3, '插件来源消息不上报')
   assert(acked.length === before + 1, '审批结果后已 ACK')
 }
 
-// agent 异常
+// agent 异常（报 warning，不进活跃告警/无需 ACK）
 {
   handlers.get('agent/error')({ agent, turn: 1, step: 1, error: new Error('模型服务超时') })
   const last = posted[posted.length - 1]
-  assert(last.body.level === 'critical' && last.body.title === 'agent 执行异常', 'agent 异常已上报 critical')
+  assert(last.body.level === 'warning' && last.body.title === 'agent 执行异常', 'agent 异常已上报 warning')
+  assert(!last.body.flash, 'agent 异常不闪烁')
   assert(last.body.body.includes('模型服务超时'), '异常上报带错误信息')
 }
 

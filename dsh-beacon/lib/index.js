@@ -171,15 +171,15 @@ function apply(ctx, config = {}) {
     }
   })
 
-  // agent 异常
+  // agent 异常（如模型报错、本轮运行失败）。报 warning 而非 critical：
+  // 这类错误不需要用户确认，critical 会成为活跃告警全屏闪烁且只能等 TTL 超时
   ctx.on('agent/error', ({ agent, error }) => {
     const message = error instanceof Error ? error.message : String(error)
     fire({
       source,
-      level: 'critical',
+      level: 'warning',
       title: 'agent 执行异常',
-      body: `session: ${agent.id}\n${message.length > 200 ? `${message.slice(0, 200)}…` : message}`,
-      flash: true
+      body: `session: ${agent.id}\n${message.length > 200 ? `${message.slice(0, 200)}…` : message}`
     })
   })
 
