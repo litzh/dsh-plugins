@@ -15,7 +15,7 @@
 ## 安装
 
 ```bash
-dsh plugin --profile web add git+ssh://git@github.com/litzh/dsh-plugins.git#v0.2.0&path:dsh-image-router
+dsh plugin --profile web add git+ssh://git@github.com/litzh/dsh-plugins.git#v0.3.0&path:dsh-image-router
 ```
 
 安装后重启 `dsh web`。
