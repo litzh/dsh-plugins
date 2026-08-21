@@ -84,6 +84,13 @@ function apply(ctx, config = {}) {
   }
   const modelLabel = `${cfg.provider}/${cfg.model}`
 
+  /**
+   * 真实能力判定专用：绑定包装前的原始 resolveModelInfo，供 modelSupportsImage /
+   * shouldRoute 使用，避免被下方「图片准入放行」包装污染（否则会把文本模型误判成
+   * 支持图片，从而放弃路由识图）。
+   */
+  const realResolveModelInfo = ctx.llm.resolveModelInfo.bind(ctx.llm)
+
   /** 模型图片能力缓存：true / false / undefined（未知）。 */
   const capabilityCache = new Map()
 
@@ -93,7 +100,7 @@ function apply(ctx, config = {}) {
     if (capabilityCache.has(key)) return capabilityCache.get(key)
     let result
     try {
-      const info = await ctx.llm.resolveModelInfo(provider, model)
+      const info = await realResolveModelInfo(provider, model)
       const mods = info?.inputModalities
       result = Array.isArray(mods) ? mods.includes('image') : undefined
     } catch {
@@ -102,6 +109,31 @@ function apply(ctx, config = {}) {
     capabilityCache.set(key, result)
     return result
   }
+
+  /**
+   * 方案 C：包装 ctx.llm.resolveModelInfo，让宿主 session.prompt 的图片准入检查放行。
+   *
+   * dsh-host-apiproxy 会在消息进入 agent 收件箱之前校验当前模型的 inputModalities：
+   * 不含 image 时直接以 MODEL_DOES_NOT_SUPPORT_IMAGES 拒绝，前端据此弹
+   * banner「当前模型不支持图片」，导致 agent/pre-step 永远轮不到执行。
+   * 这里只对「声明了 inputModalities 但不含 image」的模型补上 image 骗过准入；
+   * 随后 agent/pre-step 用上面的真实能力判定决定是否路由识图，原图仍保留在 durable log。
+   * 只包装公开的 resolveModelInfo，不碰 resolveModelInfoFor，因此适配器自身的请求校验
+   * （prepareCall/stream）仍走真实能力，识图模型的图片输入不受影响。
+   */
+  const originalResolveModelInfo = ctx.llm.resolveModelInfo
+  const wrappedResolveModelInfo = async (provider, model, signal) => {
+    const info = await realResolveModelInfo(provider, model, signal)
+    if (!cfg.enabled) return info
+    const mods = info?.inputModalities
+    return Array.isArray(mods) && !mods.includes('image')
+      ? { ...info, inputModalities: [...mods, 'image'] }
+      : info
+  }
+  ctx.llm.resolveModelInfo = wrappedResolveModelInfo
+  ctx.effect?.(() => () => {
+    if (ctx.llm.resolveModelInfo === wrappedResolveModelInfo) ctx.llm.resolveModelInfo = originalResolveModelInfo
+  }, 'image-router: resolveModelInfo image admission')
 
   /** 当前会话使用的 provider/model；无法确定时返回 undefined。 */
   function currentRoute(agent) {

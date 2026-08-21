@@ -175,5 +175,22 @@ const nextPass = (messages) => async () => ({ kind: 'enter', messages })
   assert(threw, '无有效图片路径时报错')
 }
 
+// --- 10. 包装 resolveModelInfo：对不支持图片的模型补上 image，供宿主准入放行 ---
+{
+  const ctx = makeCtx({ modalities: { 'main/text-only': ['text'], 'main/vision': ['text', 'image'] } })
+  plugin.apply(ctx, { provider: 'test-vlm', model: 'vlm' })
+  const textOnly = await ctx.llm.resolveModelInfo('main', 'text-only')
+  assert(textOnly.inputModalities.includes('image'), '包装后：文本模型被补上 image（宿主准入放行）')
+  assert(textOnly.inputModalities.includes('text'), '包装后：原 text 能力保留')
+  const vision = await ctx.llm.resolveModelInfo('main', 'vision')
+  assert(vision.inputModalities.join(',') === 'text,image', '包装后：本身支持图片的模型不变')
+}
+{
+  const ctx = makeCtx({ modalities: { 'main/text-only': ['text'] } })
+  plugin.apply(ctx, { enabled: false })
+  const textOnly = await ctx.llm.resolveModelInfo('main', 'text-only')
+  assert(!textOnly.inputModalities.includes('image'), 'enabled=false 时不做包装（返回真实能力）')
+}
+
 fs.rmSync(tmp, { recursive: true, force: true })
 console.log(process.exitCode ? '\n存在失败' : '\n全部通过')

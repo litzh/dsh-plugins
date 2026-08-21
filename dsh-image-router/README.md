@@ -9,6 +9,7 @@
 - **自动路由**：监听 `agent/pre-step`，消息含图片且当前模型不支持图片时，用识图模型识别后替换进入该 step 的消息。**durable log 中原图保留**，只替换模型可见内容；识别失败则原样放行并告警。
 - **识图后端**：进程内直接调用 `ctx.llm.stream`，不走子进程。识图模型可为 `settings.yaml` 里配置的任意供应商模型（包括自定义供应商的本地模型），默认 DeepSeek 官方 `deepseek-v4-flash`。
 - **能力判定**：`ctx.llm.resolveModelInfo` 的 `inputModalities`，按 provider/model 缓存。当前模型取自 `agent.options` 或会话最近的 request header；会话首条消息能力未知时按 `unknownCapability` 策略处理（默认 `pass` 放行）。
+- **宿主准入放行**：`dsh-host-apiproxy` 会在图片进入收件箱前按 `inputModalities` 直接拒绝并让前端弹 banner「当前模型不支持图片」，导致 `agent/pre-step` 永远轮不到执行。插件因此包装 `ctx.llm.resolveModelInfo`，对「声明了 `inputModalities` 但不含 `image`」的模型补上 `image` 骗过准入；真实能力判定仍走包装前的原始实现，路由逻辑不受影响。
 - **识图工具**：`image_describe` 供模型运行中主动识别本地图片文件（截图、报错图等），经附件服务入库后识别。
 
 ## 安装
