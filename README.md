@@ -9,7 +9,6 @@
 | [dsh-peak-pricing](dsh-peak-pricing/) | 按供应商/模型配置高峰计价时段：高峰期提交消息与长任务工具调用前在对话窗口提问确认，支持继续 / 本次高峰不再提醒 / 暂停任务，状态栏常显当前高峰或低谷。 |
 | [dsh-pets](dsh-pets/) | 在 Web GUI 内显示一个可拖拽的像素桌面宠物（动画引擎移植自 OpenAI codex 的 guga），跟随会话运行状态切换动画，并在设置面板提供宠物管理子菜单。 |
 | [dsh-beacon](dsh-beacon/) | 运行状态上报到 [beacon](https://github.com/litzh/beacon) 监控面板：进程/会话生命周期、任务开始/完成、危险命令、工具失败、等待确认（可 ACK）、异常与心跳。 |
-| [dsh-image-router](dsh-image-router/) | 多模态图片自动路由：当前模型不支持图片时，把图片交给配置的多模态模型（可为自定义供应商的本地模型）识别并注入文字结果，附 `image_describe` 工具。 |
 
 ## 安装
 
@@ -24,9 +23,6 @@ dsh plugin --profile web add git+ssh://git@github.com/litzh/dsh-plugins.git#v0.1
 
 # beacon 状态上报
 dsh plugin --profile web add git+ssh://git@github.com/litzh/dsh-plugins.git#v0.3.1&path:dsh-beacon
-
-# 图片自动路由
-dsh plugin --profile web add git+ssh://git@github.com/litzh/dsh-plugins.git#v0.3.0&path:dsh-image-router
 ```
 
 安装后重启 `dsh web` 并刷新浏览器页面。各插件的详细配置与验证方法见各自目录下的 README。
@@ -44,6 +40,5 @@ Web plugins for [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/dsh):
 - **dsh-peak-pricing** — prompts for confirmation before submitting messages or running tool calls during configurable provider/model peak-pricing windows.
 - **dsh-pets** — a draggable pixel desktop pet inside the Web GUI that follows session state, with a settings panel for pet management.
 - **dsh-beacon** — reports runtime status to a [beacon](https://github.com/litzh/beacon) monitoring panel: process/session lifecycle, task start/finish, dangerous commands, tool failures, confirmation waits (with ACK), errors, and heartbeats.
-- **dsh-image-router** — routes attached images to a configured multimodal model (including local models behind custom providers) when the active model lacks image input, with an `image_describe` tool for on-demand recognition.
 
 Install any plugin as a git dependency (see above), restart `dsh web`, and refresh the page. Released under MIT; the dsh-pets animation engine is ported from openai/codex (Apache-2.0, see `dsh-pets/NOTICE`).
