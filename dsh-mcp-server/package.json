@@ -1,0 +1,30 @@
+{
+  "name": "dsh-mcp-server",
+  "version": "0.1.0",
+  "description": "DSH plugin: exposes the running web host (sessions, prompts, approvals) as an MCP server over Streamable HTTP on 127.0.0.1",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "tools.js",
+    "approvals.js",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "test": "node test/smoke.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.25.0"
+  }
+}

@@ -1,0 +1,6 @@
+- insert:
+    - id: dsh-mcp-server
+      name: 'dsh-mcp-server'
+      # 默认配置即可用，如需覆盖：
+      # config:
+      #   port: 3079
