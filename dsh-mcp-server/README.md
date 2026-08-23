@@ -10,7 +10,7 @@
 ## 安装
 
 ```bash
-dsh plugin --profile web add git+ssh://git@github.com/litzh/dsh-plugins.git#v0.6.1&path:dsh-mcp-server
+dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#v0.6.1&path:dsh-mcp-server'
 ```
 
 安装后重启 `dsh web`。插件会被装入 `~/.dsh/profiles/web/node_modules/dsh-mcp-server`，并因声明了 `dsh.bundle` 自动加入 profile 的 bundle 列表，无需手工 insert。

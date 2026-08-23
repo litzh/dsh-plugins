@@ -74,7 +74,7 @@ DSH Web 插件：按供应商/模型配置高峰计价时段。高峰期提交�
 ```bash
 dsh plugin --profile web add link:/绝对路径/dsh-plugins/dsh-peak-pricing
 # 或 git 依赖（tag 为仓库级版本）
-dsh plugin --profile web add git+ssh://git@github.com/litzh/dsh-plugins.git#v0.1.0&path:dsh-peak-pricing
+dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#v0.1.0&path:dsh-peak-pricing'
 ```
 
 安装后重启 `dsh web`，刷新浏览器页面。host 路由注册与 client 插件集变更都在重启时生效。

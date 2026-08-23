@@ -77,7 +77,7 @@ node build-client.mjs     # src/client.template.js → lib/client.js
 monorepo 下用 `#<tag>&path:` 指向子目录，tag 为仓库级版本：
 
 ```bash
-dsh plugin --profile web add git+ssh://git@github.com/litzh/dsh-plugins.git#v0.1.0&path:dsh-pets
+dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#v0.1.0&path:dsh-pets'
 ```
 
 安装后 **需要重启 dsh web**（host 路由注册 + client 插件集变更都 take effect on restart），然后刷新浏览器页面。

@@ -17,16 +17,16 @@
 
 ```bash
 # 高峰计价提醒
-dsh plugin --profile web add git+ssh://git@github.com/litzh/dsh-plugins.git#v0.1.0&path:dsh-peak-pricing
+dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#v0.1.0&path:dsh-peak-pricing'
 
 # 桌面宠物
-dsh plugin --profile web add git+ssh://git@github.com/litzh/dsh-plugins.git#v0.1.0&path:dsh-pets
+dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#v0.1.0&path:dsh-pets'
 
 # beacon 状态上报
-dsh plugin --profile web add git+ssh://git@github.com/litzh/dsh-plugins.git#v0.3.1&path:dsh-beacon
+dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#v0.3.1&path:dsh-beacon'
 
 # MCP server（对外暴露会话/审批能力）
-dsh plugin --profile web add git+ssh://git@github.com/litzh/dsh-plugins.git#v0.6.1&path:dsh-mcp-server
+dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#v0.6.1&path:dsh-mcp-server'
 ```
 
 安装后重启 `dsh web` 并刷新浏览器页面。各插件的详细配置与验证方法见各自目录下的 README。
