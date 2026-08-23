@@ -1,0 +1,12 @@
+# dsh-vision-bridge bundle patch：注册 describe_image 工具。
+# provider/model 必填：指向一个 inputModalities 含 image 的视觉模型路由。
+# 默认用本机 MLX VLM（无网络依赖）；远程备选：hetao-ai / ds.public.deepseek-v4-flash-vision-exp。
+- insert:
+    - id: vision-bridge
+      name: 'dsh-vision-bridge'
+      config:
+        provider: mlx-vlm
+        model: Qwen3.8-27B-6bit
+        # maxTokens: 4096
+        # timeoutSeconds: 120
+        # systemPrompt: 覆盖默认的视觉识别指令
