@@ -1,6 +1,6 @@
 {
   "name": "dsh-mcp-server",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "DSH plugin: exposes the running web host (sessions, prompts, approvals) as an MCP server over Streamable HTTP on 127.0.0.1",
   "type": "module",
   "exports": {

@@ -52,6 +52,21 @@ const fakeApiProxy = {
       return { rpcId: 'x', result: { ok: true, value: { accepted: true } } }
     },
   },
+  workspace: {
+    async list() {
+      return { rpcId: 'x', result: { ok: true, value: { items: [
+        { workspaceId: 'ws-1', path: '/tmp/a', title: 'workspace A', sessionIds: ['session-fake'], createdAt: Date.now(), updatedAt: Date.now() },
+      ], archivedSessionIds: ['session-old'] } } }
+    },
+    async create({ payload }) {
+      calls.push(['workspace.create', payload])
+      return { rpcId: 'x', result: { ok: true, value: { workspace: { workspaceId: 'ws-2', path: payload.path, title: 'workspace B', sessionIds: [], createdAt: Date.now(), updatedAt: Date.now() }, created: true } } }
+    },
+    async archiveSession({ payload }) {
+      calls.push(['workspace.archiveSession', payload])
+      return { rpcId: 'x', result: { ok: true, value: { archivedSessionIds: ['session-old', payload.sessionId] } } }
+    },
+  },
 }
 
 const disposers = []
@@ -103,7 +118,7 @@ check('initialize', init.result?.serverInfo?.name === 'dsh-mcp-server', JSON.str
 
 const tools = await mcp({ jsonrpc: '2.0', id: ++nextId, method: 'tools/list', params: {} })
 const toolNames = tools.result?.tools?.map(tool => tool.name) ?? []
-check('tools/list has 8 tools', toolNames.length === 8, toolNames.join(','))
+check('tools/list has 11 tools', toolNames.length === 11, toolNames.join(','))
 
 // #1: search passes an AbortSignal through to the host.
 const search = await callTool('dsh_session_search', { query: 'hi' })
@@ -153,6 +168,24 @@ const created = await callTool('dsh_session_create', { title: 'my title', cwd: '
 check('create+rename', payloadOf(created).title === 'my title'
   && calls.find(c => c[0] === 'create')?.[1]?.cwd === '/tmp/x'
   && calls.find(c => c[0] === 'rename')?.[1]?.title === 'my title', JSON.stringify(calls))
+
+// workspace grouping: workspaceId passthrough, mutual exclusion with cwd.
+calls.length = 0
+await callTool('dsh_session_create', { workspaceId: 'ws-1' })
+check('create with workspaceId', calls.find(c => c[0] === 'create')?.[1]?.workspaceId === 'ws-1', JSON.stringify(calls))
+const both = await callTool('dsh_session_create', { workspaceId: 'ws-1', cwd: '/tmp/x' })
+check('workspaceId+cwd rejected', both.isError === true, JSON.stringify(both))
+
+// workspace tools.
+const wsList = await callTool('dsh_workspace_list', {})
+const wsPayload = payloadOf(wsList)
+check('workspace list', wsPayload.items[0]?.workspaceId === 'ws-1'
+  && typeof wsPayload.items[0]?.createdAt === 'string'
+  && wsPayload.archivedSessionIds.includes('session-old'), wsList.content[0].text)
+const wsCreate = await callTool('dsh_workspace_create', { path: '/tmp/b' })
+check('workspace create', payloadOf(wsCreate).created === true && payloadOf(wsCreate).workspace.workspaceId === 'ws-2', wsCreate.content[0].text)
+const archived = await callTool('dsh_session_archive', { sessionId: 'session-idle' })
+check('session archive', payloadOf(archived).archivedSessionIds.includes('session-idle'), archived.content[0].text)
 
 // prompt fire-and-forget still works.
 const prompt = await callTool('dsh_prompt', { text: 'ping' })

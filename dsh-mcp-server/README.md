@@ -10,7 +10,7 @@
 ## 安装
 
 ```bash
-dsh plugin --profile web add git+ssh://git@github.com/litzh/dsh-plugins.git#v0.5.0&path:dsh-mcp-server
+dsh plugin --profile web add git+ssh://git@github.com/litzh/dsh-plugins.git#v0.6.0&path:dsh-mcp-server
 ```
 
 安装后重启 `dsh web`。插件会被装入 `~/.dsh/profiles/web/node_modules/dsh-mcp-server`，并因声明了 `dsh.bundle` 自动加入 profile 的 bundle 列表，无需手工 insert。
@@ -34,7 +34,10 @@ dsh plugin --profile web add git+ssh://git@github.com/litzh/dsh-plugins.git#v0.5
 |---|---|
 | `dsh_session_list` | 列出会话（id、标题、running、cwd、最近活动）；可选过滤 `sessionId`（精确查单个，适合轮询状态）、`running`、`cwd` |
 | `dsh_session_search` | 全文搜索会话内容 |
-| `dsh_session_create` | 新建会话；可选 `cwd`（默认宿主工作目录）、`agentPreset`、`title`（create 后经 rename 设置，失败会返回 `titleError` 但会话已建好） |
+| `dsh_session_create` | 新建会话；可选 `workspaceId`（在指定工作区内创建，cwd 取工作区路径，与 `cwd` 互斥；不传则是未分组会话）、`cwd`、`agentPreset`、`title`（create 后经 rename 设置，失败会返回 `titleError` 但会话已建好） |
+| `dsh_workspace_list` | 列出工作区（workspaceId、path、title、成员 sessionIds）与已归档会话 id |
+| `dsh_workspace_create` | 按 path 创建工作区（path 必须已存在；同路径已有工作区则复用，返回 `created: false`） |
+| `dsh_session_archive` | 归档会话（从列表隐藏，日志保留） |
 | `dsh_prompt` | 注入文本 prompt。默认 fire-and-forget 立即返回 `accepted`（省略 sessionId 则先建会话）；传 `waitSeconds`（≤45s）则阻塞等到本轮结束并返回结构化 `outcome`、审批挂起（`awaitingApproval`）或超时（`pending`） |
 | `dsh_history` | 读取会话最近消息（user/assistant/tool-result/结构化 turn 结局）。`hasMore: true` 时把最旧一条的 `seq` 作为 `beforeSeq` 继续翻页；`includeToolDetails: true` 展开工具调用入参与结果文本（截断） |
 | `dsh_cancel` | 停止当前轮（排队消息保留）；`wasRunning` 表明取消时是否真有活跃轮次 |
@@ -45,7 +48,7 @@ dsh plugin --profile web add git+ssh://git@github.com/litzh/dsh-plugins.git#v0.5
 
 - **参数严格校验**：传错参数名（如 `limit` 而非 `maxMessages`）会立即报 validation error，不会静默忽略。
 - **turn 结局是结构化的**：`{ role: "turn", outcome: "completed" | "aborted" | "blocked" | "error" | "max-tokens" | "interrupted" }`，error 时附带 `error.code` / `error.message`，不要做字符串匹配。
-- **宿主能力边界**：会话删除/归档宿主 API 不支持，会话只增不减；`waitSeconds` 在 prompt 排队于另一个进行中的轮次时，前一个轮次的结束也会解除等待。
+- **宿主能力边界**：会话只能归档（`dsh_session_archive`）不能彻底删除；`waitSeconds` 在 prompt 排队于另一个进行中的轮次时，前一个轮次的结束也会解除等待。
 
 ## 客户端接入
 

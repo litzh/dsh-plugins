@@ -192,16 +192,23 @@ export function registerTools(server, apiProxy, bridge) {
   })
 
   server.registerTool('dsh_session_create', {
-    description: 'Create a new DSH session. Defaults to the host working directory and the default agent preset.',
+    description: 'Create a new DSH session. Defaults to the host working directory and the default agent preset. '
+      + 'Pass workspaceId (from dsh_workspace_list / dsh_workspace_create) to create the session inside an existing '
+      + 'workspace; the workspace path then determines cwd (workspaceId and cwd cannot be combined). '
+      + 'Without workspaceId the session is ungrouped.',
     inputSchema: z.object({
       cwd: z.string().optional(),
+      workspaceId: z.string().optional(),
       agentPreset: z.string().optional(),
       title: z.string().min(1).optional(),
-    }).strict(),
-  }, async ({ cwd, agentPreset, title }) => {
+    }).strict().refine(value => !(value.workspaceId !== undefined && value.cwd !== undefined), {
+      message: 'workspaceId and cwd cannot be combined (the workspace path determines cwd)',
+    }),
+  }, async ({ cwd, workspaceId, agentPreset, title }) => {
     try {
       const created = await rpc(apiProxy, 'sessions', 'create', {
         ...(cwd === undefined ? {} : { cwd }),
+        ...(workspaceId === undefined ? {} : { workspaceId }),
         ...(agentPreset === undefined ? {} : { agentPreset }),
       })
       if (title === undefined) return json(created)
@@ -212,6 +219,46 @@ export function registerTools(server, apiProxy, bridge) {
         // The session exists; only the naming failed (e.g. no session-title service).
         return json({ ...created, titleError: String(error?.message ?? error) })
       }
+    } catch (error) { return failure(error) }
+  })
+
+  server.registerTool('dsh_workspace_list', {
+    description: 'List DSH workspaces (workspaceId, path, title, member sessionIds) and archived session ids. '
+      + 'Use a workspaceId from here with dsh_session_create to group new sessions into that workspace.',
+    inputSchema: z.object({}).strict(),
+  }, async () => {
+    try {
+      const value = await rpc(apiProxy, 'workspace', 'list', {})
+      return json({
+        items: value.items.map(item => ({
+          workspaceId: item.workspaceId,
+          path: item.path,
+          title: item.title,
+          sessionIds: item.sessionIds,
+          createdAt: typeof item.createdAt === 'number' ? new Date(item.createdAt).toISOString() : item.createdAt,
+          updatedAt: typeof item.updatedAt === 'number' ? new Date(item.updatedAt).toISOString() : item.updatedAt,
+        })),
+        archivedSessionIds: value.archivedSessionIds,
+      })
+    } catch (error) { return failure(error) }
+  })
+
+  server.registerTool('dsh_workspace_create', {
+    description: 'Create a new DSH workspace at an existing directory path. '
+      + 'A path that already has a workspace is reused (created: false).',
+    inputSchema: z.object({ path: z.string().min(1) }).strict(),
+  }, async ({ path }) => {
+    try {
+      return json(await rpc(apiProxy, 'workspace', 'create', { path }))
+    } catch (error) { return failure(error) }
+  })
+
+  server.registerTool('dsh_session_archive', {
+    description: 'Archive a DSH session (hide it from the session list; the log is kept).',
+    inputSchema: z.object({ sessionId: z.string() }).strict(),
+  }, async ({ sessionId }) => {
+    try {
+      return json(await rpc(apiProxy, 'workspace', 'archiveSession', { sessionId }))
     } catch (error) { return failure(error) }
   })
 
