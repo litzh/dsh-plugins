@@ -159,16 +159,25 @@ function latestTurnEnd(entries, baselineSeq) {
 export function registerTools(server, apiProxy, bridge) {
   server.registerTool('dsh_session_list', {
     description: 'List DSH sessions with id, title, running state, cwd and last activity time. '
+      + 'Archived sessions are excluded by default (pass includeArchived to list them; each row carries an archived flag). '
       + 'Optional filters: sessionId (exact, for polling one session\'s state), running, cwd.',
     inputSchema: z.object({
       sessionId: z.string().optional(),
       running: z.boolean().optional(),
       cwd: z.string().optional(),
+      includeArchived: z.boolean().optional(),
     }).strict(),
-  }, async ({ sessionId, running, cwd }) => {
+  }, async ({ sessionId, running, cwd, includeArchived }) => {
     try {
-      const value = await rpc(apiProxy, 'sessions', 'list', {})
+      // The host session list does not know archive state (the Web UI filters
+      // client-side from workspace.list), so fetch both and join here.
+      const [value, workspace] = await Promise.all([
+        rpc(apiProxy, 'sessions', 'list', {}),
+        rpc(apiProxy, 'workspace', 'list', {}),
+      ])
+      const archived = new Set(workspace.archivedSessionIds)
       let items = value.items
+      if (includeArchived !== true) items = items.filter(item => !archived.has(item.sessionId))
       if (sessionId !== undefined) items = items.filter(item => item.sessionId === sessionId)
       if (running !== undefined) items = items.filter(item => item.running === running)
       if (cwd !== undefined) items = items.filter(item => item.cwd === cwd)
@@ -177,6 +186,7 @@ export function registerTools(server, apiProxy, bridge) {
         title: item.projections?.values?.title ?? null,
         running: item.running,
         cwd: item.cwd ?? null,
+        archived: archived.has(item.sessionId),
         updatedAt: new Date(item.updatedAt).toISOString(),
       })))
     } catch (error) { return failure(error) }
@@ -196,16 +206,20 @@ export function registerTools(server, apiProxy, bridge) {
       + 'Pass workspaceId (from dsh_workspace_list / dsh_workspace_create) to create the session inside an existing '
       + 'workspace; the workspace path then determines cwd (workspaceId and cwd cannot be combined). '
       + 'Without workspaceId the session is ungrouped.',
+    // The mutex check lives in the handler, not a schema .refine(): refining
+    // wraps the object in ZodEffects, which MCP clients cannot render as a
+    // parameter list during tool self-discovery.
     inputSchema: z.object({
       cwd: z.string().optional(),
       workspaceId: z.string().optional(),
       agentPreset: z.string().optional(),
       title: z.string().min(1).optional(),
-    }).strict().refine(value => !(value.workspaceId !== undefined && value.cwd !== undefined), {
-      message: 'workspaceId and cwd cannot be combined (the workspace path determines cwd)',
-    }),
+    }).strict(),
   }, async ({ cwd, workspaceId, agentPreset, title }) => {
     try {
+      if (workspaceId !== undefined && cwd !== undefined) {
+        throw new Error('invalid-arguments: workspaceId and cwd cannot be combined (the workspace path determines cwd)')
+      }
       const created = await rpc(apiProxy, 'sessions', 'create', {
         ...(cwd === undefined ? {} : { cwd }),
         ...(workspaceId === undefined ? {} : { workspaceId }),

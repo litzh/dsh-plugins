@@ -26,6 +26,7 @@ const fakeApiProxy = {
       return { rpcId: 'x', result: { ok: true, value: { items: [
         { sessionId: 'session-fake', running: true, cwd: '/tmp/a', updatedAt: Date.now(), projections: { values: { title: 'fake session' } } },
         { sessionId: 'session-idle', running: false, cwd: '/tmp/b', updatedAt: Date.now(), projections: { values: { title: 'idle session' } } },
+        { sessionId: 'session-old', running: false, cwd: '/tmp/a', updatedAt: Date.now(), projections: { values: { title: 'archived session' } } },
       ] } } }
     },
     async search(request, signal) {
@@ -120,14 +121,24 @@ const tools = await mcp({ jsonrpc: '2.0', id: ++nextId, method: 'tools/list', pa
 const toolNames = tools.result?.tools?.map(tool => tool.name) ?? []
 check('tools/list has 11 tools', toolNames.length === 11, toolNames.join(','))
 
+// Regression: every advertised inputSchema must expose its properties
+// (a zod .refine() wrapper renders as an empty shape to MCP clients).
+const createTool = tools.result.tools.find(tool => tool.name === 'dsh_session_create')
+check('create schema introspectable', ['cwd', 'workspaceId', 'agentPreset', 'title']
+  .every(key => key in (createTool?.inputSchema?.properties ?? {})), JSON.stringify(createTool?.inputSchema))
+
 // #1: search passes an AbortSignal through to the host.
 const search = await callTool('dsh_session_search', { query: 'hi' })
 check('search works', search.isError !== true && payloadOf(search).items.length === 1, search.content[0].text)
 check('search received signal', calls.find(c => c[0] === 'search')?.[2] === true, JSON.stringify(calls.find(c => c[0] === 'search')))
 
-// #6: list filters.
+// #6: list filters; archived sessions excluded by default.
 const listAll = await callTool('dsh_session_list', {})
-check('list all', payloadOf(listAll).length === 2, listAll.content[0].text)
+check('list excludes archived by default', payloadOf(listAll).length === 2
+  && payloadOf(listAll).every(item => item.archived === false), listAll.content[0].text)
+const listWithArchived = await callTool('dsh_session_list', { includeArchived: true })
+check('includeArchived lists with flag', payloadOf(listWithArchived).length === 3
+  && payloadOf(listWithArchived).find(item => item.sessionId === 'session-old')?.archived === true, listWithArchived.content[0].text)
 const listRunning = await callTool('dsh_session_list', { running: false })
 check('list running filter', payloadOf(listRunning).length === 1 && payloadOf(listRunning)[0].sessionId === 'session-idle', listRunning.content[0].text)
 const listOne = await callTool('dsh_session_list', { sessionId: 'session-fake' })
