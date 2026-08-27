@@ -1,8 +1,0 @@
-- insert:
-    - id: beacon
-      name: 'dsh-beacon'
-      # 默认配置即可用，如需覆盖：
-      # config:
-      #   url: http://localhost:7331
-      #   token: ''
-      #   source: dsh

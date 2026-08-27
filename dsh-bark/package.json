@@ -1,7 +1,7 @@
 {
-  "name": "dsh-beacon",
-  "version": "0.2.0",
-  "description": "DSH 运行状态上报到 beacon 监控面板：进程/会话生命周期、任务开始/完成、危险命令、工具失败、等待确认（可 ACK）、异常与心跳",
+  "name": "dsh-bark",
+  "version": "0.1.0",
+  "description": "通过 Bark 向 iOS 设备推送消息：注册 bark_push 工具，支持标题/副标题/正文、铃声、分组、角标、点击跳转、持续响铃、级别等参数",
   "type": "module",
   "exports": {
     ".": "./lib/index.js",
