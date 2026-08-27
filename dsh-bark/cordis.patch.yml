@@ -2,6 +2,8 @@
     - id: dsh-bark
       name: 'dsh-bark'
       config:
+        # 完整推送地址 https://api.day.app/<key>，自动解析 server + deviceKey；缺省读环境变量 BARK_URL
+        # url: ''
         # Bark 服务地址；用自建服务时改这里。缺省读环境变量 BARK_SERVER
         server: https://api.day.app
         # 默认设备密钥；缺省读环境变量 BARK_DEVICE_KEY

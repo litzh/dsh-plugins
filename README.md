@@ -8,7 +8,7 @@
 |---|---|
 | [dsh-peak-pricing](dsh-peak-pricing/) | 按供应商/模型配置高峰计价时段：高峰期提交消息与长任务工具调用前在对话窗口提问确认，支持继续 / 本次高峰不再提醒 / 暂停任务，状态栏常显当前高峰或低谷。 |
 | [dsh-pets](dsh-pets/) | 在 Web GUI 内显示一个可拖拽的像素桌面宠物（动画引擎移植自 OpenAI codex 的 guga），跟随会话运行状态切换动画，并在设置面板提供宠物管理子菜单。 |
-| [dsh-bark](dsh-bark/) | 通过 [Bark](https://github.com/Finb/Bark) 向 iOS 设备推送消息：注册 `bark_push` 工具，支持标题/副标题/正文、铃声、分组、角标、点击跳转、持续响铃、级别等参数。 |
+| [dsh-bark](dsh-bark/) | 通过 [Bark](https://github.com/Finb/Bark) 向 iOS 设备推送**静默（passive）**通知：注册 `bark_push` 工具，支持标题/副标题/正文、铃声、分组、角标、点击跳转、复制、存档等参数。 |
 | [dsh-mcp-server](dsh-mcp-server/) | 把运行中的 DSH Web 宿主封装成 MCP server（Streamable HTTP，127.0.0.1）：外部 MCP 客户端（Claude Code、Cursor、另一个 DSH、脚本等）可列出/搜索/归档会话、在工作区内创建会话、注入 prompt、读取历史、处理审批。 |
 | [dsh-vision-bridge](dsh-vision-bridge/) | 让不支持多模态的模型通过 `describe_image` 工具把图片识别委托给视觉模型：主模型只收到文字描述，图片字节不进入它的上下文。 |
 
@@ -24,7 +24,7 @@ dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#v0.
 dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#v0.1.0&path:dsh-pets'
 
 # Bark iOS 消息推送
-dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#v0.8.1&path:dsh-bark'
+dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#v0.10.0&path:dsh-bark'
 
 # MCP server（对外暴露会话/审批能力）
 dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#v0.6.1&path:dsh-mcp-server'
@@ -47,7 +47,7 @@ Web plugins for [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/dsh):
 
 - **dsh-peak-pricing** — prompts for confirmation before submitting messages or running tool calls during configurable provider/model peak-pricing windows.
 - **dsh-pets** — a draggable pixel desktop pet inside the Web GUI that follows session state, with a settings panel for pet management.
-- **dsh-bark** — pushes messages to iOS devices via [Bark](https://github.com/Finb/Bark) through a `bark_push` tool, supporting title/subtitle/body, sound, group, badge, click-through URL, continuous ringing, and notification level.
+- **dsh-bark** — pushes silent (passive) notifications to iOS devices via [Bark](https://github.com/Finb/Bark) through a `bark_push` tool, supporting title/subtitle/body, sound, group, badge, click-through URL, clipboard copy, and archiving.
 - **dsh-mcp-server** — exposes the running DSH web host as an MCP server (Streamable HTTP on 127.0.0.1) so external MCP clients (Claude Code, Cursor, another DSH, scripts) can list/search/archive sessions, create sessions inside workspaces, inject prompts, read history, and handle approvals.
 - **dsh-vision-bridge** — lets a text-only model delegate image recognition to a vision model via a `describe_image` tool; the primary model only receives the textual description and image bytes never enter its context.
 

@@ -1,6 +1,6 @@
 # dsh-bark
 
-通过 [Bark](https://github.com/Finb/Bark) 向 iOS 设备推送消息。注册一个 `bark_push` 工具，模型/用户可用它把通知发到手机。
+通过 [Bark](https://github.com/Finb/Bark) 向 iOS 设备推送消息。注册一个 `bark_push` 工具，模型/用户可用它把**静默（passive）**通知发到手机。
 
 底层调用 Bark 服务的 REST 接口（[API V2](https://github.com/Finb/bark-server/blob/master/docs/API_V2.md)）`POST /push`。
 
@@ -8,7 +8,9 @@
 
 | 工具 | 用途 |
 |---|---|
-| `bark_push` | 向 iOS 设备推送一条通知 |
+| `bark_push` | 向 iOS 设备推送一条**静默**通知 |
+
+> 安全策略：`bark_push` **固定为 `passive` 静默级别**，不会响铃或震动。工具不暴露 `level` / `call` 参数，模型无法自主发起穿透静音（critical/timeSensitive）或强响铃（call）的推送。
 
 ### `bark_push` 参数
 
@@ -18,16 +20,16 @@
 | `title` | string | 通知标题（字号大于正文） |
 | `subtitle` | string | 通知副标题 |
 | `deviceKey` | string | 目标设备密钥；不填用默认配置 |
-| `level` | string | `critical` / `active` / `timeSensitive` / `passive` |
-| `sound` | string | 铃声；不填用默认铃声 |
+| `sound` | string | 铃声；不填用默认铃声（传 `none` 可静音） |
 | `group` | string | 分组；不填用默认分组 |
 | `url` | string | 点击通知跳转的 URL |
 | `icon` | string | 图标 URL（仅 iOS 15+）；不填用默认图标 |
 | `badge` | number | App 图标角标数字 |
-| `call` | boolean | 为 true 时持续响铃 30 秒 |
+| `copy` | string | 推送时自动复制到剪贴板的内容 |
+| `autoCopy` | boolean | 为 true 时自动复制通知正文到剪贴板 |
 | `isArchive` | boolean | 为 true 时让 App 存档该通知 |
 
-返回 `{ sent: boolean, code: number|null, message: string }`。请求失败（服务不可达、密钥错误等）不抛异常，返回 `sent: false` 与错误信息。
+返回 `{ sent: boolean, code: number|null, message: string }`。请求失败（服务不可达、密钥错误等）不抛异常，返回 `sent: false` 与错误信息。模型侧渲染为可读文本（`✅ 已推送` / `❌ 推送失败（HTTP …）`）。
 
 ## 安装
 
@@ -44,6 +46,7 @@ dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#<ta
 ```yaml
 - id: dsh-bark
   config:                       # 以下均为默认值，可按需覆盖
+    url: ''                     # 完整推送地址 https://api.day.app/<key>，自动解析 server + deviceKey
     server: https://api.day.app # Bark 服务地址；自建服务改这里。缺省读环境变量 BARK_SERVER
     deviceKey: ''               # 默认设备密钥；缺省读环境变量 BARK_DEVICE_KEY
     defaultSound: ''            # 默认铃声
@@ -52,10 +55,13 @@ dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#<ta
 ```
 
 设备密钥获取：在手机上安装 Bark App，App 首页会显示你的推送地址，形如
-`https://api.day.app/你的Key/`，其中的 `你的Key` 即 `deviceKey`。
+`https://api.day.app/你的Key/`。可以直接把整段地址填进 `url`，或把 `你的Key` 填进 `deviceKey`。
 
-- `server` 缺省时读环境变量 `BARK_SERVER`
-- `deviceKey` 缺省时读环境变量 `BARK_DEVICE_KEY`
+优先级：**环境变量 > `url` > `server`+`deviceKey`**。
+
+- `BARK_URL`：完整推送地址，覆盖 `url`
+- `BARK_SERVER`：服务地址
+- `BARK_DEVICE_KEY`：设备密钥
 - 工具参数 `deviceKey` 优先级高于配置/环境变量
 
 ## 测试
