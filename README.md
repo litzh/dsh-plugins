@@ -24,7 +24,7 @@ dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#v0.
 dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#v0.1.0&path:dsh-pets'
 
 # Bark iOS 消息推送
-dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#v0.8.0&path:dsh-bark'
+dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#v0.8.1&path:dsh-bark'
 
 # MCP server（对外暴露会话/审批能力）
 dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#v0.6.1&path:dsh-mcp-server'

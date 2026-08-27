@@ -1,5 +1,5 @@
 - insert:
-    - id: bark
+    - id: dsh-bark
       name: 'dsh-bark'
       config:
         # Bark 服务地址；用自建服务时改这里。缺省读环境变量 BARK_SERVER
