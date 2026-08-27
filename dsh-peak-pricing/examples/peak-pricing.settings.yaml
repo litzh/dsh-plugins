@@ -1,0 +1,29 @@
+# 这是 DSH 用户设置文档 `~/.dsh/settings.yaml` 中的 `peak-pricing` 段
+# （不是完整文件）。把下面整段并入你已有的 settings.yaml 即可；或直接
+# 在设置面板「高峰计价」页可视化编辑并保存，效果相同。
+#
+# 字段语义与 examples/peak-pricing.json 完全一致（JSON 是同一份配置的
+# JSON 形态）：规则按顺序匹配，命中活跃时段即视为高峰。
+
+peak-pricing:
+  rules:
+    - provider: deepseek-official
+      model: deepseek-*
+      timezone: Asia/Shanghai
+      periods:
+        - days: [mon, tue, wed, thu, fri]
+          start: '09:00'
+          end: '12:00'
+        - days: [mon, tue, wed, thu, fri]
+          start: '14:00'
+          end: '18:00'
+        - start: '22:00'
+          end: '02:00'
+    - provider: anthropic
+      model: anthropic/claude-*
+      periods:
+        - start: '00:00'
+          end: '00:00'
+  remindIntervalMinutes: 15
+  promptTimeoutSeconds: 0
+  autoContinueOnPeakEnd: false

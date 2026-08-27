@@ -18,7 +18,7 @@
 
 ```bash
 # 高峰计价提醒
-dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#v0.1.0&path:dsh-peak-pricing'
+dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#v0.9.0&path:dsh-peak-pricing'
 
 # 桌面宠物
 dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#v0.1.0&path:dsh-pets'

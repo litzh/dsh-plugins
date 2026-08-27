@@ -379,8 +379,10 @@ function daysLabel(days) {
  *   - 导出 apply(ctx) 与 inject；
  *   - 依赖 react（boot 图中的平台种子模块）。
  *
- * 前端职责（对应方案 1/3）：
- *   - 从 GET /__dsh-peak-pricing/config 拉取高峰期定义；
+ * 前端职责：
+ *   - 通过 ctx.settingsScope 读取 DSH 标准用户设置 `settings.yaml` 的
+ *     `peak-pricing` 命名空间（host 侧经 installSettingsSection 注册，
+ *     热重载实时推送），不再使用独立 JSON 文件；
  *   - 通过 ctx.modelDirectories 读取当前会话选中的 provider/model；
  *   - 用共享 schedule 逻辑判断高峰/低谷：高峰时给 document.body 加
  *     dshpp-peak 类，把输入框旁模型选择器里的模型名染成橙色（低谷
@@ -389,13 +391,11 @@ function daysLabel(days) {
  *     /__dsh-peak-pricing/submit-confirm，由 ctx.userQuestions 在对话窗口
  *     中提问；选择“暂不开始”则不调用原 submit，草稿自然留在输入框。
  *   - 注册 settings.section「高峰计价」设置页：可视化编辑规则与全局
- *     选项，POST /__dsh-peak-pricing/config 整份保存（host 校验后原子写入）。
+ *     选项，经 connection.api.settings.replace 整份写回 settings.yaml。
  * ========================================================================= */
 
-const CONFIG_URL = "/__dsh-peak-pricing/config";
 const SUBMIT_CONFIRM_URL = "/__dsh-peak-pricing/submit-confirm";
 const TICK_MS = 5000;
-const CONFIG_TICKS = 6; // 每 30 秒重拉一次配置
 const NOTICE_LIFETIME_MS = 8000;
 /** 高峰时加到 document.body 上的类：CSS 据此把模型名染橙。 */
 const PEAK_BODY_CLASS = "dshpp-peak";
@@ -489,6 +489,69 @@ function createController(ctx) {
   const sessions = ctx.sessions;
   const modelDirectories = ctx.get("modelDirectories") ?? null;
   const conversation = ctx.get("conversation") ?? null;
+  const settingsScope = ctx.get("settingsScope") ?? null;
+  const connection = ctx.get("connection") ?? null;
+
+  // 绑定 `peak-pricing` 命名空间的 settings scope：读配置 + 订阅热重载推送。
+  // settings 服务或 ui-settings 缺失时降级为「配置不可用」，高峰判定恒为
+  // 低谷、提交拦截放行，host 侧同样回退到组合 base（空规则）。
+  let scope = null;
+  let unsubscribeSettings = null;
+  if (settingsScope !== null && typeof settingsScope.bind === "function") {
+    try {
+      scope = settingsScope.bind({ namespace: "peak-pricing" });
+      unsubscribeSettings = scope.subscribe(() => adoptSettingsSnapshot());
+    } catch (error) {
+      console.warn("[dsh-peak-pricing] settings scope bind failed:", error);
+      scope = null;
+    }
+  }
+
+  /** 把 settings 的 resolved value 归一化后写入 store，并刷新高峰状态。 */
+  function applyConfigValue(value, hasUser) {
+    try {
+      const config = normalizeConfig(value);
+      store.update({
+        config,
+        configState: "ready",
+        configError: null,
+        configPresent: hasUser,
+      });
+    } catch (error) {
+      store.update({
+        configState: "error",
+        configError: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /** 从 settings scope 快照同步配置到 store。 */
+  function adoptSettingsSnapshot() {
+    if (disposed) return;
+    if (scope === null) {
+      store.update({
+        configState: "error",
+        configError: "settings 服务不可用",
+      });
+      recompute();
+      return;
+    }
+    const snapshot = scope.getSnapshot();
+    if (snapshot.status === "loading") {
+      store.update({ configState: "loading" });
+      return;
+    }
+    if (snapshot.status === "unavailable" || snapshot.value === undefined) {
+      store.update({
+        configState: "error",
+        configError: "peak-pricing 命名空间未注册或不可用",
+      });
+      recompute();
+      return;
+    }
+    applyConfigValue(snapshot.value, snapshot.user !== undefined);
+    recompute();
+  }
 
   function currentPeakFor(model, now) {
     if (model === null || disposed) return null;
@@ -718,28 +781,30 @@ function createController(ctx) {
     }
   }
 
-  async function refreshConfig() {
-    if (disposed) return;
-    try {
-      const response = await fetch(CONFIG_URL, {
-        headers: { accept: "application/json" },
-        cache: "no-store",
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const wire = await response.json();
-      if (wire && wire.ok === false) throw new Error(wire.error || "config endpoint rejected");
-      const config = normalizeConfig(wire);
-      store.update({
-        config,
-        configState: "ready",
-        configError: null,
-        configPresent: wire?.present === true,
-      });
-    } catch (error) {
-      store.update({
-        configState: "error",
-        configError: error instanceof Error ? error.message : String(error),
-      });
+  /**
+   * 设置页整份保存：把表单载荷经 connection.api.settings.replace 写回
+   * settings.yaml 的 peak-pricing 段。成功返回的 view 即时回填 store，
+   * 不等 settings/document-updated 事件链（事件链随后也会幂等触发一次）。
+   */
+  async function saveConfig(payload) {
+    if (connection === null || scope === null) {
+      throw new Error("settings 服务不可用，无法保存配置");
+    }
+    const snapshot = scope.getSnapshot();
+    const response = await connection.api.settings.replace({
+      ns: "peak-pricing",
+      section: payload,
+      ...(snapshot.revision === undefined ? {} : { expectedRevision: snapshot.revision }),
+    });
+    if (!response?.result?.ok) {
+      const message = response?.result?.error?.message ?? "settings replace failed";
+      throw new Error(message);
+    }
+    const view = response.result.value;
+    if (view && typeof view.value === "object" && view.value !== null) {
+      applyConfigValue(view.value, view.user !== undefined);
+    } else {
+      adoptSettingsSnapshot();
     }
     recompute();
   }
@@ -760,12 +825,11 @@ function createController(ctx) {
   function start() {
     if (disposed) return;
     onSessionsChanged();
-    void refreshConfig();
+    adoptSettingsSnapshot();
     syncPeakClass();
     tickTimer = setInterval(() => {
       recompute();
       tick += 1;
-      if (tick % CONFIG_TICKS === 0) void refreshConfig();
     }, TICK_MS);
     if (typeof document !== "undefined") {
       document.addEventListener("visibilitychange", onVisibilityChange);
@@ -775,7 +839,7 @@ function createController(ctx) {
   function onVisibilityChange() {
     if (document.visibilityState === "visible") {
       recompute();
-      void refreshConfig();
+      adoptSettingsSnapshot();
     }
   }
 
@@ -797,6 +861,14 @@ function createController(ctx) {
     disposeSessions();
     unbindModel();
     unsubscribePeakClass();
+    if (unsubscribeSettings !== null) {
+      try {
+        unsubscribeSettings();
+      } catch {
+        // settings scope 已随 client 释放。
+      }
+      unsubscribeSettings = null;
+    }
     if (typeof document !== "undefined" && document.body != null) {
       document.body.classList.remove(PEAK_BODY_CLASS);
     }
@@ -818,7 +890,8 @@ function createController(ctx) {
   const api = {
     store,
     clearNotice,
-    refreshConfig,
+    refreshConfig: adoptSettingsSnapshot,
+    saveConfig,
   };
 
   return {
@@ -830,10 +903,10 @@ function createController(ctx) {
   };
 }
 
-/* ---- 设置页：可视化编辑 ~/.dsh/peak-pricing.json ----
+/* ---- 设置页：可视化编辑 settings.yaml 的 peak-pricing 段 ----
  * 注册为 settings.section 的一页（id=peak-pricing，label=高峰计价）。
- * 草稿从 GET /config 的归一化结果初始化；保存时整份 POST 回 host，
- * 由 host 用 normalizeConfig 校验并原子写入磁盘。 */
+ * 草稿从 settings scope 的归一化结果初始化；保存时经
+ * connection.api.settings.replace 整份写回，由 host 的 schema + normalizeConfig 校验。 */
 
 const DAY_LABELS = ["日", "一", "二", "三", "四", "五", "六"]; // 与 DAY_CODES 对齐
 
@@ -930,18 +1003,8 @@ function PeakPricingSettings(props) {
     }
     setStatus({ kind: "saving", text: "保存中…" });
     try {
-      const response = await fetch(CONFIG_URL, {
-        method: "POST",
-        headers: { accept: "application/json", "content-type": "application/json" },
-        body: JSON.stringify(payload),
-        cache: "no-store",
-      });
-      const wire = await response.json().catch(() => null);
-      if (!response.ok || wire?.ok !== true) {
-        throw new Error(wire?.error ?? `HTTP ${response.status}`);
-      }
-      await controller.api.refreshConfig();
-      setStatus({ kind: "ok", text: `已保存到 ${wire.path}` });
+      await controller.api.saveConfig(payload);
+      setStatus({ kind: "ok", text: "已保存到 settings.yaml 的 peak-pricing 段" });
     } catch (error) {
       setStatus({ kind: "error", text: `保存失败：${error.message}` });
     }
@@ -984,7 +1047,8 @@ function PeakPricingSettings(props) {
   return h("div", { className: "dshpp-settings" },
     h("p", { className: "dshpp-hint" },
       "按顺序匹配规则；命中活跃时段即视为高峰。保存后立即生效，无需重启。配置文件也可手动编辑：",
-      h("code", null, "~/.dsh/peak-pricing.json"),
+      h("code", null, "~/.dsh/settings.yaml"),
+      "（", h("code", null, "peak-pricing"), " 段）",
     ),
 
     h("h3", { className: "dshpp-heading" }, "全局选项"),
@@ -1206,7 +1270,7 @@ function injectCss() {
 }
 
 /* ---- 插件入口 ---- */
-const inject = ["slots", "sessions", "modelDirectories", "conversation"];
+const inject = ["slots", "sessions", "modelDirectories", "conversation", "settingsScope", "connection"];
 
 function apply(ctx) {
   injectCss();

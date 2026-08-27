@@ -1,3 +1,13 @@
+# dsh-peak-pricing bundle patch：注册 host 半区插件。
+# 高峰规则与全局选项是用户偏好数据，默认放 settings.yaml 的 `peak-pricing` 段
+# （由 @deepseek-ai/dsh-settings-file 提供，设置页写入）。这里的 config 只作为
+# 组合 base：settings 未覆盖时的回退默认值；用户可在 profile/home 的
+# cordis.patch.yml 按 id 覆盖整份 config，或在设置页里可视化编辑。
 - insert:
     - id: dsh-peak-pricing
       name: 'dsh-peak-pricing'
+      config:
+        rules: []
+        remindIntervalMinutes: 15
+        promptTimeoutSeconds: 0
+        autoContinueOnPeakEnd: false

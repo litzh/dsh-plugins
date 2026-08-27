@@ -1,15 +1,14 @@
 // dsh-peak-pricing 核心逻辑测试：
 //   1. 高峰时段纯逻辑（通配符、时区、跨午夜、星期过滤、全天）；
-//   2. host 半区接口与 tools/execute 拦截（mock Context，不依赖 DSH 进程）。
+//   2. host 半区 tools/execute 拦截与 submit-confirm 接口（mock Context，
+//      配置经 mock settings 服务注入，不依赖 DSH 进程）。
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import test from 'node:test'
 
 import {
   daysLabel,
+  defaultTimeZone,
   matchesRule,
   normalizeConfig,
   parseHm,
@@ -148,8 +147,31 @@ test('periodLabel / daysLabel / parseHm 基础行为', () => {
 /* host 半区 mock                                                      */
 /* ------------------------------------------------------------------ */
 
-function createMockCts(agent) {
+/**
+ * 构造带 mock settings 服务的 Context。
+ * `initialConfig` 作为生效配置的初始值；测试通过 `ctx.setConfig(next)`
+ * 运行中改配置（模拟 settings 热重载），host 侧 source() 现读即生效。
+ */
+function createMockCts(agent, initialConfig = { rules: [] }) {
   const listeners = new Map()
+  let current = normalizeConfig(initialConfig, defaultTimeZone())
+
+  const mockScope = {
+    get() {
+      return current
+    },
+    watch() {
+      return () => {}
+    },
+    update() {
+      return Promise.resolve()
+    },
+    replace(section) {
+      current = normalizeConfig(section, defaultTimeZone())
+      return Promise.resolve()
+    },
+  }
+
   const ctx = {
     logger: { warn() {}, error() {} },
     webServer: {
@@ -184,6 +206,26 @@ function createMockCts(agent) {
         return [agent]
       },
     },
+    // installSettingsSection 会调用 ctx.inject(['settings'], cb)；这里模拟
+    // settings 服务已激活，注册返回可变的 mockScope。
+    inject(_selection, callback) {
+      const sctx = Object.create(ctx)
+      sctx.settings = {
+        register() {
+          return mockScope
+        },
+      }
+      sctx.effect = (fn) => {
+        fn()
+        return () => {}
+      }
+      callback(sctx)
+      return () => {}
+    },
+    /** 测试挂钩：运行中改变生效配置。 */
+    setConfig(next) {
+      current = normalizeConfig(next, defaultTimeZone())
+    },
   }
   return ctx
 }
@@ -198,39 +240,6 @@ function mockAgent(id, provider = 'deepseek-official', model = 'deepseek-chat', 
       },
     },
   }
-}
-
-async function callConfigRoute(ctx) {
-  let body = ''
-  let status = 0
-  const res = {
-    writeHead(code) {
-      status = code
-    },
-    end(chunk) {
-      body = typeof chunk === 'string' ? chunk : ''
-    },
-  }
-  await ctx.route.handler({ method: 'GET', url: '/__dsh-peak-pricing/config' }, res)
-  return { status, body: JSON.parse(body) }
-}
-
-async function callSaveConfigRoute(ctx, payload) {
-  let body = ''
-  let status = 0
-  const req = Readable.from([JSON.stringify(payload)])
-  req.method = 'POST'
-  req.url = '/__dsh-peak-pricing/config'
-  const res = {
-    writeHead(code) {
-      status = code
-    },
-    end(chunk) {
-      body = typeof chunk === 'string' ? chunk : ''
-    },
-  }
-  await ctx.route.handler(req, res)
-  return { status, body: JSON.parse(body) }
 }
 
 async function callSubmitConfirmRoute(ctx, payload) {
@@ -251,89 +260,16 @@ async function callSubmitConfirmRoute(ctx, payload) {
   return { status, body: JSON.parse(body) }
 }
 
-test('host 提供配置查询接口，并返回归一化高峰期定义', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'dsh-peak-pricing-'))
-  const previousHome = process.env.DSH_HOME
-  process.env.DSH_HOME = home
-  try {
-    const agent = mockAgent('route-agent')
-    const ctx = createMockCts(agent)
-    const dispose = plugin.apply(ctx)
-
-    let response = await callConfigRoute(ctx)
-    assert.equal(response.status, 200)
-    assert.equal(response.body.present, false)
-    assert.deepEqual(response.body.rules, [])
-
-    await writeFile(join(home, 'peak-pricing.json'), JSON.stringify({
-      rules: [{
-        provider: 'deepseek-official',
-        model: 'deepseek-*',
-        timezone: 'Asia/Shanghai',
-        periods: [{ days: ['mon'], start: '09:00', end: '18:00' }],
-      }],
-      remindIntervalMinutes: 7,
-      promptTimeoutSeconds: 3,
-    }))
-    response = await callConfigRoute(ctx)
-    assert.equal(response.status, 200)
-    assert.equal(response.body.present, true)
-    assert.equal(response.body.rules[0].model, 'deepseek-*')
-    assert.equal(response.body.remindIntervalMinutes, 7)
-    assert.equal(response.body.promptTimeoutSeconds, 3)
-
-    dispose()
-  } finally {
-    process.env.DSH_HOME = previousHome
-    await rm(home, { recursive: true, force: true })
-  }
-})
-
-
-test('POST /config 校验并原子保存整份配置', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'dsh-peak-pricing-'))
-  const previousHome = process.env.DSH_HOME
-  process.env.DSH_HOME = home
-  try {
-    const ctx = createMockCts(mockAgent('save-agent'))
-    const dispose = plugin.apply(ctx)
-
-    // 非法配置：400，不落盘。
-    let response = await callSaveConfigRoute(ctx, { rules: [{ model: 'm', periods: [{ start: '9:00', end: '18:00' }] }] })
-    assert.equal(response.status, 400)
-    assert.match(response.body.error, /start must be "HH:mm"/)
-
-    // 合法配置：200，写入归一化结果（provider 缺省补 '*'），GET 立即可读。
-    response = await callSaveConfigRoute(ctx, {
-      rules: [{ model: 'deepseek/deepseek-*', timezone: 'Asia/Shanghai', periods: [{ start: '09:00', end: '12:00' }] }],
-      remindIntervalMinutes: 5,
-      autoContinueOnPeakEnd: true,
-    })
-    assert.equal(response.status, 200)
-    assert.equal(response.body.ok, true)
-    const onDisk = JSON.parse(await readFile(join(home, 'peak-pricing.json'), 'utf8'))
-    assert.equal(onDisk.rules[0].provider, '*')
-    assert.equal(onDisk.rules[0].timezone, 'Asia/Shanghai')
-    assert.equal(onDisk.autoContinueOnPeakEnd, true)
-    const query = await callConfigRoute(ctx)
-    assert.equal(query.body.rules[0].model, 'deepseek/deepseek-*')
-    assert.equal(query.body.autoContinueOnPeakEnd, true)
-
-    dispose()
-  } finally {
-    process.env.DSH_HOME = previousHome
-    await rm(home, { recursive: true, force: true })
-  }
-})
+/* ------------------------------------------------------------------ */
+/* host 半区行为                                                       */
+/* ------------------------------------------------------------------ */
 
 test('autoContinueOnPeakEnd：提问等待期间离开高峰自动继续', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'dsh-peak-pricing-'))
-  const previousHome = process.env.DSH_HOME
   const previousPoll = plugin.internals.autoContinuePollMs
-  process.env.DSH_HOME = home
   plugin.internals.autoContinuePollMs = 20
   try {
-    await writeFile(join(home, 'peak-pricing.json'), JSON.stringify({
+    const agent = mockAgent('auto-continue-agent')
+    const ctx = createMockCts(agent, {
       rules: [{
         provider: 'deepseek-official',
         model: 'deepseek-chat',
@@ -342,10 +278,7 @@ test('autoContinueOnPeakEnd：提问等待期间离开高峰自动继续', async
       }],
       autoContinueOnPeakEnd: true,
       promptTimeoutSeconds: 0,
-    }))
-
-    const agent = mockAgent('auto-continue-agent')
-    const ctx = createMockCts(agent)
+    })
     let asks = 0
     ctx.userQuestions.ask = ({ signal }) => {
       asks += 1
@@ -354,7 +287,7 @@ test('autoContinueOnPeakEnd：提问等待期间离开高峰自动继续', async
         else signal.addEventListener('abort', () => reject(signal.reason ?? new Error('aborted')))
       })
     }
-    const dispose = plugin.apply(ctx)
+    const dispose = plugin.apply(ctx, {})
     const listener = ctx.listeners.get('tools/execute')[0]
     const exec = { parent: undefined, agent, signal: new AbortController().signal }
 
@@ -365,26 +298,22 @@ test('autoContinueOnPeakEnd：提问等待期间离开高峰自动继续', async
     assert.equal(nextCalls, 0, '提问期间不得执行工具')
 
     // 用户不在时高峰结束（这里以规则被清空模拟）：提问被取消，自动继续。
-    await writeFile(join(home, 'peak-pricing.json'), JSON.stringify({ rules: [], autoContinueOnPeakEnd: true }))
+    ctx.setConfig({ rules: [], autoContinueOnPeakEnd: true })
     await pending
     assert.equal(nextCalls, 1, '离开高峰后应自动继续执行工具')
 
     dispose()
   } finally {
     plugin.internals.autoContinuePollMs = previousPoll
-    process.env.DSH_HOME = previousHome
-    await rm(home, { recursive: true, force: true })
   }
 })
 
 test('autoContinueOnPeakEnd 关闭时：离开高峰不干预，提问继续等待', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'dsh-peak-pricing-'))
-  const previousHome = process.env.DSH_HOME
   const previousPoll = plugin.internals.autoContinuePollMs
-  process.env.DSH_HOME = home
   plugin.internals.autoContinuePollMs = 20
   try {
-    await writeFile(join(home, 'peak-pricing.json'), JSON.stringify({
+    const agent = mockAgent('no-auto-continue-agent')
+    const ctx = createMockCts(agent, {
       rules: [{
         provider: 'deepseek-official',
         model: 'deepseek-chat',
@@ -392,23 +321,20 @@ test('autoContinueOnPeakEnd 关闭时：离开高峰不干预，提问继续等�
         periods: [{ start: '00:00', end: '00:00' }],
       }],
       promptTimeoutSeconds: 0,
-    }))
-
-    const agent = mockAgent('no-auto-continue-agent')
-    const ctx = createMockCts(agent)
+    })
     ctx.userQuestions.ask = async () => {
       // 模拟用户稍后回来选择「继续执行」。
       await delay(120)
       return { answers: [{ id: 'peak-pricing-run', selected: ['继续执行'] }] }
     }
-    const dispose = plugin.apply(ctx)
+    const dispose = plugin.apply(ctx, {})
     const listener = ctx.listeners.get('tools/execute')[0]
     const exec = { parent: undefined, agent, signal: new AbortController().signal }
 
     let nextCalls = 0
     const pending = listener(exec, async () => { nextCalls += 1; return { isError: false, content: [] } })
     await delay(40)
-    await writeFile(join(home, 'peak-pricing.json'), JSON.stringify({ rules: [] }))
+    ctx.setConfig({ rules: [] })
     await pending
     assert.equal(nextCalls, 1, '用户选择继续后正常执行')
     // 再触发一次：离开高峰后不再提问。
@@ -418,328 +344,239 @@ test('autoContinueOnPeakEnd 关闭时：离开高峰不干预，提问继续等�
     dispose()
   } finally {
     plugin.internals.autoContinuePollMs = previousPoll
-    process.env.DSH_HOME = previousHome
-    await rm(home, { recursive: true, force: true })
-  }
-})
-
-
-test('配置损坏时查询接口返回 500，而不是静默降级', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'dsh-peak-pricing-'))
-  const previousHome = process.env.DSH_HOME
-  process.env.DSH_HOME = home
-  try {
-    await writeFile(join(home, 'peak-pricing.json'), '{not json')
-    const ctx = createMockCts(mockAgent('bad-config-agent'))
-    const dispose = plugin.apply(ctx)
-    const response = await callConfigRoute(ctx)
-    assert.equal(response.status, 500)
-    assert.equal(response.body.ok, false)
-    assert.match(response.body.error, /not valid JSON/)
-    dispose()
-  } finally {
-    process.env.DSH_HOME = previousHome
-    await rm(home, { recursive: true, force: true })
   }
 })
 
 test('运行中进入高峰：询问一次，继续则调用 next；“不再提醒”抑制同一窗口', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'dsh-peak-pricing-'))
-  const previousHome = process.env.DSH_HOME
-  process.env.DSH_HOME = home
-  try {
-    await writeFile(join(home, 'peak-pricing.json'), JSON.stringify({
-      rules: [{
-        provider: 'deepseek-official',
-        model: 'deepseek-chat',
-        timezone: 'UTC',
-        periods: [{ start: '00:00', end: '00:00' }],
-      }],
-      remindIntervalMinutes: 15,
-      promptTimeoutSeconds: 0,
-    }))
-
-    const agent = mockAgent('suppress-agent')
-    const ctx = createMockCts(agent)
-    let asks = 0
-    ctx.userQuestions.ask = async (request) => {
-      asks += 1
-      assert.equal(request.questions[0].options.length, 3)
-      assert.match(request.questions[0].detail, /UTC/, '时段文案应包含规则时区')
-      assert.doesNotMatch(request.questions[0].detail, /undefined/, '时段文案不得出现 undefined')
-      return { answers: [{ id: request.questions[0].id, selected: ['本次高峰不再提醒'] }] }
-    }
-    const dispose = plugin.apply(ctx)
-    const listener = ctx.listeners.get('tools/execute')[0]
-    const exec = { parent: undefined, agent, signal: new AbortController().signal }
-
-    let nextCalls = 0
-    const first = await listener(exec, async () => { nextCalls += 1; return { isError: false, content: [] } })
-    assert.equal(first.isError, false)
-    assert.equal(nextCalls, 1)
-    assert.equal(asks, 1)
-
-    const second = await listener(exec, async () => { nextCalls += 1; return { isError: false, content: [] } })
-    assert.equal(second.isError, false)
-    assert.equal(nextCalls, 2)
-    assert.equal(asks, 1, '同一 occurrence 不应重复询问')
-
-    dispose()
-  } finally {
-    process.env.DSH_HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+  const agent = mockAgent('suppress-agent')
+  const ctx = createMockCts(agent, {
+    rules: [{
+      provider: 'deepseek-official',
+      model: 'deepseek-chat',
+      timezone: 'UTC',
+      periods: [{ start: '00:00', end: '00:00' }],
+    }],
+    remindIntervalMinutes: 15,
+    promptTimeoutSeconds: 0,
+  })
+  let asks = 0
+  ctx.userQuestions.ask = async (request) => {
+    asks += 1
+    assert.equal(request.questions[0].options.length, 3)
+    assert.match(request.questions[0].detail, /UTC/, '时段文案应包含规则时区')
+    assert.doesNotMatch(request.questions[0].detail, /undefined/, '时段文案不得出现 undefined')
+    return { answers: [{ id: request.questions[0].id, selected: ['本次高峰不再提醒'] }] }
   }
+  const dispose = plugin.apply(ctx, {})
+  const listener = ctx.listeners.get('tools/execute')[0]
+  const exec = { parent: undefined, agent, signal: new AbortController().signal }
+
+  let nextCalls = 0
+  const first = await listener(exec, async () => { nextCalls += 1; return { isError: false, content: [] } })
+  assert.equal(first.isError, false)
+  assert.equal(nextCalls, 1)
+  assert.equal(asks, 1)
+
+  const second = await listener(exec, async () => { nextCalls += 1; return { isError: false, content: [] } })
+  assert.equal(second.isError, false)
+  assert.equal(nextCalls, 2)
+  assert.equal(asks, 1, '同一 occurrence 不应重复询问')
+
+  dispose()
 })
 
 test('运行中进入高峰：暂停返回错误工具结果并保留现场，新用户消息后恢复', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'dsh-peak-pricing-'))
-  const previousHome = process.env.DSH_HOME
-  process.env.DSH_HOME = home
-  try {
-    await writeFile(join(home, 'peak-pricing.json'), JSON.stringify({
-      rules: [{
-        provider: 'deepseek-official',
-        model: 'deepseek-chat',
-        timezone: 'UTC',
-        periods: [{ start: '00:00', end: '00:00' }],
-      }],
-      promptTimeoutSeconds: 0,
-    }))
-
-    const agent = mockAgent('pause-agent')
-    const ctx = createMockCts(agent)
-    let asks = 0
-    ctx.userQuestions.ask = async () => {
-      asks += 1
-      return { answers: [{ id: 'peak-pricing-run', selected: ['暂停任务'] }] }
-    }
-    const dispose = plugin.apply(ctx)
-    const listener = ctx.listeners.get('tools/execute')[0]
-    const exec = { parent: undefined, agent, signal: new AbortController().signal }
-
-    let nextCalls = 0
-    const first = await listener(exec, async () => { nextCalls += 1; return { isError: false, content: [] } })
-    assert.equal(nextCalls, 0, '暂停时不得执行工具')
-    assert.equal(first.isError, true)
-    assert.equal(first.error.message.includes('pause'), true)
-    assert.equal(Array.isArray(first.additionalContexts), true)
-    assert.equal(first.additionalContexts[0].source.kind, 'plugin')
-
-    const second = await listener(exec, async () => { nextCalls += 1; return { isError: false, content: [] } })
-    assert.equal(nextCalls, 0, '同一 turn 的后续工具调用也应暂停')
-    assert.equal(second.isError, true)
-    assert.equal(asks, 1, '暂停状态不应重复弹窗')
-
-    // 用户发送新消息是明确恢复信号。
-    const inserted = ctx.listeners.get('agent/inbox/inserted')[0]
-    inserted({ agent, message: { source: { kind: 'user' } } })
-    const third = await listener(exec, async () => { nextCalls += 1; return { isError: false, content: [] } })
-    assert.equal(nextCalls, 1)
-    assert.equal(third.isError, false)
-
-    dispose()
-  } finally {
-    process.env.DSH_HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+  const agent = mockAgent('pause-agent')
+  const ctx = createMockCts(agent, {
+    rules: [{
+      provider: 'deepseek-official',
+      model: 'deepseek-chat',
+      timezone: 'UTC',
+      periods: [{ start: '00:00', end: '00:00' }],
+    }],
+    promptTimeoutSeconds: 0,
+  })
+  let asks = 0
+  ctx.userQuestions.ask = async () => {
+    asks += 1
+    return { answers: [{ id: 'peak-pricing-run', selected: ['暂停任务'] }] }
   }
+  const dispose = plugin.apply(ctx, {})
+  const listener = ctx.listeners.get('tools/execute')[0]
+  const exec = { parent: undefined, agent, signal: new AbortController().signal }
+
+  let nextCalls = 0
+  const first = await listener(exec, async () => { nextCalls += 1; return { isError: false, content: [] } })
+  assert.equal(nextCalls, 0, '暂停时不得执行工具')
+  assert.equal(first.isError, true)
+  assert.equal(first.error.message.includes('pause'), true)
+  assert.equal(Array.isArray(first.additionalContexts), true)
+  assert.equal(first.additionalContexts[0].source.kind, 'plugin')
+
+  const second = await listener(exec, async () => { nextCalls += 1; return { isError: false, content: [] } })
+  assert.equal(nextCalls, 0, '同一 turn 的后续工具调用也应暂停')
+  assert.equal(second.isError, true)
+  assert.equal(asks, 1, '暂停状态不应重复弹窗')
+
+  // 用户发送新消息是明确恢复信号。
+  const inserted = ctx.listeners.get('agent/inbox/inserted')[0]
+  inserted({ agent, message: { source: { kind: 'user' } } })
+  const third = await listener(exec, async () => { nextCalls += 1; return { isError: false, content: [] } })
+  assert.equal(nextCalls, 1)
+  assert.equal(third.isError, false)
+
+  dispose()
 })
 
 test('非根 agent 与嵌套工具调用不拦截', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'dsh-peak-pricing-'))
-  const previousHome = process.env.DSH_HOME
-  process.env.DSH_HOME = home
-  try {
-    await writeFile(join(home, 'peak-pricing.json'), JSON.stringify({
-      rules: [{
-        provider: 'deepseek-official',
-        model: 'deepseek-chat',
-        timezone: 'UTC',
-        periods: [{ start: '00:00', end: '00:00' }],
-      }],
-    }))
-    const parent = mockAgent('parent-agent')
-    const child = mockAgent('child-agent')
-    const ctx = createMockCts(parent)
-    ctx.agents.roots = () => [parent]
-    let asks = 0
-    ctx.userQuestions.ask = async () => { asks += 1; return { answers: [] } }
-    const dispose = plugin.apply(ctx)
-    const listener = ctx.listeners.get('tools/execute')[0]
-    let nextCalls = 0
+  const parent = mockAgent('parent-agent')
+  const child = mockAgent('child-agent')
+  const ctx = createMockCts(parent, {
+    rules: [{
+      provider: 'deepseek-official',
+      model: 'deepseek-chat',
+      timezone: 'UTC',
+      periods: [{ start: '00:00', end: '00:00' }],
+    }],
+  })
+  ctx.agents.roots = () => [parent]
+  let asks = 0
+  ctx.userQuestions.ask = async () => { asks += 1; return { answers: [] } }
+  const dispose = plugin.apply(ctx, {})
+  const listener = ctx.listeners.get('tools/execute')[0]
+  let nextCalls = 0
 
-    await listener({ parent: 'token', agent: parent, signal: new AbortController().signal }, async () => { nextCalls += 1 })
-    await listener({ parent: undefined, agent: child, signal: new AbortController().signal }, async () => { nextCalls += 1 })
-    assert.equal(nextCalls, 2)
-    assert.equal(asks, 0)
+  await listener({ parent: 'token', agent: parent, signal: new AbortController().signal }, async () => { nextCalls += 1 })
+  await listener({ parent: undefined, agent: child, signal: new AbortController().signal }, async () => { nextCalls += 1 })
+  assert.equal(nextCalls, 2)
+  assert.equal(asks, 0)
 
-    dispose()
-  } finally {
-    process.env.DSH_HOME = previousHome
-    await rm(home, { recursive: true, force: true })
-  }
+  dispose()
 })
 
 test('promptTimeoutSeconds > 0：超时后自动继续', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'dsh-peak-pricing-'))
-  const previousHome = process.env.DSH_HOME
-  process.env.DSH_HOME = home
-  try {
-    await writeFile(join(home, 'peak-pricing.json'), JSON.stringify({
-      rules: [{
-        provider: 'deepseek-official',
-        model: 'deepseek-chat',
-        timezone: 'UTC',
-        periods: [{ start: '00:00', end: '00:00' }],
-      }],
-      promptTimeoutSeconds: 0.05,
-    }))
-    const agent = mockAgent('timeout-agent')
-    const ctx = createMockCts(agent)
-    let asks = 0
-    ctx.userQuestions.ask = (request) => new Promise((_resolve, reject) => {
-      asks += 1
-      request.signal.addEventListener('abort', () => reject(request.signal.reason), { once: true })
-    })
-    const dispose = plugin.apply(ctx)
-    const listener = ctx.listeners.get('tools/execute')[0]
-    const exec = { parent: undefined, agent, signal: new AbortController().signal }
-    let nextCalls = 0
-    const startedAt = Date.now()
-    await listener(exec, async () => { nextCalls += 1; return { isError: false, content: [] } })
-    assert.equal(nextCalls, 1)
-    assert.equal(asks, 1)
-    assert.ok(Date.now() - startedAt >= 30, '应等待超时后自动继续')
+  const agent = mockAgent('timeout-agent')
+  const ctx = createMockCts(agent, {
+    rules: [{
+      provider: 'deepseek-official',
+      model: 'deepseek-chat',
+      timezone: 'UTC',
+      periods: [{ start: '00:00', end: '00:00' }],
+    }],
+    promptTimeoutSeconds: 0.05,
+  })
+  let asks = 0
+  ctx.userQuestions.ask = (request) => new Promise((_resolve, reject) => {
+    asks += 1
+    request.signal.addEventListener('abort', () => reject(request.signal.reason), { once: true })
+  })
+  const dispose = plugin.apply(ctx, {})
+  const listener = ctx.listeners.get('tools/execute')[0]
+  const exec = { parent: undefined, agent, signal: new AbortController().signal }
+  let nextCalls = 0
+  const startedAt = Date.now()
+  await listener(exec, async () => { nextCalls += 1; return { isError: false, content: [] } })
+  assert.equal(nextCalls, 1)
+  assert.equal(asks, 1)
+  assert.ok(Date.now() - startedAt >= 30, '应等待超时后自动继续')
 
-    dispose()
-  } finally {
-    process.env.DSH_HOME = previousHome
-    await rm(home, { recursive: true, force: true })
-  }
+  dispose()
 })
 
 test('remindIntervalMinutes 冷却：继续后间隔内不再询问', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'dsh-peak-pricing-'))
-  const previousHome = process.env.DSH_HOME
-  process.env.DSH_HOME = home
-  try {
-    await writeFile(join(home, 'peak-pricing.json'), JSON.stringify({
-      rules: [{
-        provider: 'deepseek-official',
-        model: 'deepseek-chat',
-        timezone: 'UTC',
-        periods: [{ start: '00:00', end: '00:00' }],
-      }],
-      remindIntervalMinutes: 15,
-    }))
-    const agent = mockAgent('cooldown-agent')
-    const ctx = createMockCts(agent)
-    let asks = 0
-    ctx.userQuestions.ask = async () => {
-      asks += 1
-      return { answers: [{ id: 'peak-pricing-run', selected: ['继续执行'] }] }
-    }
-    const dispose = plugin.apply(ctx)
-    const listener = ctx.listeners.get('tools/execute')[0]
-    const exec = { parent: undefined, agent, signal: new AbortController().signal }
-    let nextCalls = 0
-    await listener(exec, async () => { nextCalls += 1 })
-    await listener(exec, async () => { nextCalls += 1 })
-    assert.equal(nextCalls, 2)
-    assert.equal(asks, 1)
-
-    dispose()
-  } finally {
-    process.env.DSH_HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+  const agent = mockAgent('cooldown-agent')
+  const ctx = createMockCts(agent, {
+    rules: [{
+      provider: 'deepseek-official',
+      model: 'deepseek-chat',
+      timezone: 'UTC',
+      periods: [{ start: '00:00', end: '00:00' }],
+    }],
+    remindIntervalMinutes: 15,
+  })
+  let asks = 0
+  ctx.userQuestions.ask = async () => {
+    asks += 1
+    return { answers: [{ id: 'peak-pricing-run', selected: ['继续执行'] }] }
   }
+  const dispose = plugin.apply(ctx, {})
+  const listener = ctx.listeners.get('tools/execute')[0]
+  const exec = { parent: undefined, agent, signal: new AbortController().signal }
+  let nextCalls = 0
+  await listener(exec, async () => { nextCalls += 1 })
+  await listener(exec, async () => { nextCalls += 1 })
+  assert.equal(nextCalls, 2)
+  assert.equal(asks, 1)
+
+  dispose()
 })
 
 test('运行中高峰判断使用 request/header 的实际模型，而不是 AgentOptions seed', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'dsh-peak-pricing-'))
-  const previousHome = process.env.DSH_HOME
-  process.env.DSH_HOME = home
-  try {
-    await writeFile(join(home, 'peak-pricing.json'), JSON.stringify({
-      rules: [{
-        provider: 'deepseek-official',
-        model: 'deepseek-chat',
-        timezone: 'UTC',
-        periods: [{ start: '00:00', end: '00:00' }],
-      }],
-    }))
+  const agent = mockAgent('switch-agent', 'deepseek-official', 'deepseek-chat', {
+    provider: 'opencode-go',
+    model: 'deepseek-v4-pro',
+  })
+  const ctx = createMockCts(agent, {
+    rules: [{
+      provider: 'deepseek-official',
+      model: 'deepseek-chat',
+      timezone: 'UTC',
+      periods: [{ start: '00:00', end: '00:00' }],
+    }],
+  })
+  let asks = 0
+  ctx.userQuestions.ask = async () => { asks += 1; return { answers: [] } }
+  const dispose = plugin.apply(ctx, {})
+  const listener = ctx.listeners.get('tools/execute')[0]
+  const exec = { parent: undefined, agent, signal: new AbortController().signal }
+  let nextCalls = 0
+  await listener(exec, async () => { nextCalls += 1; return { isError: false, content: [] } })
+  assert.equal(nextCalls, 1)
+  assert.equal(asks, 0, '新模型处于低谷时不得用旧 AgentOptions 误判为高峰')
 
-    // Agent.options 还是创建时的旧模型；本 step 实际已切换到新模型。
-    const agent = mockAgent('switch-agent', 'deepseek-official', 'deepseek-chat', {
-      provider: 'opencode-go',
-      model: 'deepseek-v4-pro',
-    })
-    const ctx = createMockCts(agent)
-    let asks = 0
-    ctx.userQuestions.ask = async () => { asks += 1; return { answers: [] } }
-    const dispose = plugin.apply(ctx)
-    const listener = ctx.listeners.get('tools/execute')[0]
-    const exec = { parent: undefined, agent, signal: new AbortController().signal }
-    let nextCalls = 0
-    await listener(exec, async () => { nextCalls += 1; return { isError: false, content: [] } })
-    assert.equal(nextCalls, 1)
-    assert.equal(asks, 0, '新模型处于低谷时不得用旧 AgentOptions 误判为高峰')
-
-    dispose()
-  } finally {
-    process.env.DSH_HOME = previousHome
-    await rm(home, { recursive: true, force: true })
-  }
+  dispose()
 })
 
 test('提交确认接口通过 userQuestions 提问：暂不开始返回 defer，非高峰不提问', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'dsh-peak-pricing-'))
-  const previousHome = process.env.DSH_HOME
-  process.env.DSH_HOME = home
-  try {
-    await writeFile(join(home, 'peak-pricing.json'), JSON.stringify({
-      rules: [{
-        provider: 'deepseek-official',
-        model: 'deepseek-chat',
-        timezone: 'UTC',
-        periods: [{ start: '00:00', end: '00:00' }],
-      }],
-      promptTimeoutSeconds: 0,
-    }))
-    const agent = mockAgent('submit-route-agent')
-    const ctx = createMockCts(agent)
-    let asks = 0
-    ctx.userQuestions.ask = async (request) => {
-      asks += 1
-      assert.equal(request.agent, agent)
-      assert.equal(request.questions[0].id, 'peak-pricing-submit')
-      assert.deepEqual(request.questions[0].options.map(option => option.label), ['继续提交', '暂不开始'])
-      return { answers: [{ id: request.questions[0].id, selected: ['暂不开始'] }] }
-    }
-    const dispose = plugin.apply(ctx)
-
-    const defer = await callSubmitConfirmRoute(ctx, {
-      sessionId: 'submit-route-agent',
+  const agent = mockAgent('submit-route-agent')
+  const ctx = createMockCts(agent, {
+    rules: [{
       provider: 'deepseek-official',
       model: 'deepseek-chat',
-    })
-    assert.equal(defer.status, 200)
-    assert.equal(defer.body.ok, true)
-    assert.equal(defer.body.action, 'defer')
-    assert.equal(asks, 1)
-
-    const offPeak = await callSubmitConfirmRoute(ctx, {
-      sessionId: 'submit-route-agent',
-      provider: 'opencode-go',
-      model: 'deepseek-v4-pro',
-    })
-    assert.equal(offPeak.status, 200)
-    assert.equal(offPeak.body.action, 'continue')
-    assert.equal(offPeak.body.reason, 'off-peak')
-    assert.equal(asks, 1, '低谷模型不应再次提问')
-
-    dispose()
-  } finally {
-    process.env.DSH_HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+      timezone: 'UTC',
+      periods: [{ start: '00:00', end: '00:00' }],
+    }],
+    promptTimeoutSeconds: 0,
+  })
+  let asks = 0
+  ctx.userQuestions.ask = async (request) => {
+    asks += 1
+    assert.equal(request.agent, agent)
+    assert.equal(request.questions[0].id, 'peak-pricing-submit')
+    assert.deepEqual(request.questions[0].options.map(option => option.label), ['继续提交', '暂不开始'])
+    return { answers: [{ id: request.questions[0].id, selected: ['暂不开始'] }] }
   }
+  const dispose = plugin.apply(ctx, {})
+
+  const defer = await callSubmitConfirmRoute(ctx, {
+    sessionId: 'submit-route-agent',
+    provider: 'deepseek-official',
+    model: 'deepseek-chat',
+  })
+  assert.equal(defer.status, 200)
+  assert.equal(defer.body.ok, true)
+  assert.equal(defer.body.action, 'defer')
+  assert.equal(asks, 1)
+
+  const offPeak = await callSubmitConfirmRoute(ctx, {
+    sessionId: 'submit-route-agent',
+    provider: 'opencode-go',
+    model: 'deepseek-v4-pro',
+  })
+  assert.equal(offPeak.status, 200)
+  assert.equal(offPeak.body.action, 'continue')
+  assert.equal(offPeak.body.reason, 'off-peak')
+  assert.equal(asks, 1, '低谷模型不应再次提问')
+
+  dispose()
 })

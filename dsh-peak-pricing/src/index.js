@@ -2,9 +2,10 @@
  * dsh-peak-pricing · host 半区。
  *
  * 职责：
- *   1. 读取 ~/.dsh/peak-pricing.json（遵循 $DSH_HOME）并注册配置接口：
- *      GET  /__dsh-peak-pricing/config —— 返回归一化后的高峰期定义；
- *      POST /__dsh-peak-pricing/config —— 校验并原子保存整份配置（设置页用）。
+ *   1. 通过 DSH 标准的 settings 机制读取高峰规则与全局选项。配置段位于
+ *      `~/.dsh/settings.yaml` 的 `peak-pricing:` 命名空间（由
+ *      `@deepseek-ai/dsh-settings-file` 提供，设置页可视化写入）；cordis.patch.yml
+ *      的 `config` 只作为组合 base（settings 未覆盖时的回退默认）。
  *   2. 提供 POST /__dsh-peak-pricing/submit-confirm：浏览器端在提交前
  *      调用此接口，由 host 通过 ctx.userQuestions 在当前会话的对话窗口
  *      中提问（继续提交 / 暂不开始），替代浏览器自定义模态弹窗。
@@ -19,12 +20,13 @@
  *      additionalContexts 的错误工具结果自然停止当前 turn，不 abort，
  *      现场（会话日志、inbox、草稿）完整保留，用户发新消息后继续。
  *
- * 只依赖 Node 内置模块，link 安装时 realpath 后仍可正常加载。
+ * 只依赖 Node 内置模块与 cordis/schemastery/dsh-settings（peer 依赖），
+ * link 安装时 realpath 后仍可正常加载。
  */
-import { promises as fs } from 'node:fs'
-import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import z from '@deepseek-ai/schemastery'
+import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import {
+  DAY_CODES,
   daysLabel,
   defaultTimeZone,
   normalizeConfig,
@@ -36,11 +38,9 @@ export const name = 'dsh-peak-pricing'
 export const inject = ['webServer', 'tools', 'userQuestions', 'agents']
 
 const ROUTE_PREFIX = '/__dsh-peak-pricing'
-const ROUTE_CONFIG = `${ROUTE_PREFIX}/config`
 const ROUTE_SUBMIT_CONFIRM = `${ROUTE_PREFIX}/submit-confirm`
-const CONFIG_BASENAME = 'peak-pricing.json'
-const DSH_HOME_ENV = 'DSH_HOME'
-const DSH_HOME_DIR_NAME = '.dsh'
+
+const NS = settingsNamespace('peak-pricing')
 
 const OPT_CONTINUE = '继续执行'
 const OPT_SUPPRESS = '本次高峰不再提醒'
@@ -48,7 +48,26 @@ const OPT_PAUSE = '暂停任务'
 const OPT_SUBMIT = '继续提交'
 const OPT_DEFER = '暂不开始'
 
-const EMPTY_CONFIG = normalizeConfig({ rules: [] }, defaultTimeZone())
+/**
+ * 高峰计价配置 schema。结构 + 类型 + 默认值交给 schemastery；HH:mm 格式、
+ * IANA 时区有效性、provider/model 非空、数值非负等深度校验交给
+ * normalizeConfig（作为 settings 的 validate 钩子）。
+ */
+export const Config = z.object({
+  rules: z.array(z.object({
+    provider: z.string(),
+    model: z.string().required(),
+    timezone: z.string(),
+    periods: z.array(z.object({
+      days: z.array(z.union(DAY_CODES)),
+      start: z.string().required(),
+      end: z.string().required(),
+    })).required(),
+  })).default([]),
+  remindIntervalMinutes: z.number().default(15),
+  promptTimeoutSeconds: z.number().default(0),
+  autoContinueOnPeakEnd: z.boolean().default(false),
+})
 
 /**
  * 测试挂钩：自动继续轮询间隔（毫秒）。运行时保持默认即可，
@@ -58,92 +77,16 @@ export const internals = {
   autoContinuePollMs: 15_000,
 }
 
-/* ------------------------------------------------------------------ */
-/* 配置文件路径与读取                                                  */
-/* ------------------------------------------------------------------ */
-
-function expandHomePath(path) {
-  if (path === '~') return homedir()
-  if (path.startsWith('~/') || path.startsWith('~\\')) return join(homedir(), path.slice(2))
-  return path
-}
-
-function configPath() {
-  const fromEnv = process.env[DSH_HOME_ENV]
-  const base = fromEnv !== void 0 && fromEnv.trim().length > 0
-    ? fromEnv
-    : join(homedir(), DSH_HOME_DIR_NAME)
-  return join(resolve(expandHomePath(base)), CONFIG_BASENAME)
-}
-
-async function readConfigDocument() {
-  const path = configPath()
-  let raw
-  try {
-    raw = await fs.readFile(path, 'utf8')
-  } catch (error) {
-    if (error && error.code === 'ENOENT') {
-      return { present: false, path, config: EMPTY_CONFIG }
-    }
-    throw error
-  }
-  let parsed
-  try {
-    parsed = JSON.parse(raw)
-  } catch (error) {
-    throw new Error(`peak-pricing config ${path} is not valid JSON: ${error.message}`, { cause: error })
-  }
-  return {
-    present: true,
-    path,
-    config: normalizeConfig(parsed, defaultTimeZone()),
-  }
-}
-
-/** 供调度器使用的轻量缓存：文件 mtime/size 不变时复用上次成功解析结果。 */
-let runtimeCache = null
-
-async function runtimeConfig() {
-  const path = configPath()
-  let stat
-  try {
-    stat = await fs.stat(path)
-  } catch (error) {
-    if (error && error.code === 'ENOENT') {
-      runtimeCache = { path, mtimeMs: 0, size: -1, present: false, config: EMPTY_CONFIG }
-      return runtimeCache.config
-    }
-    throw error
-  }
-  if (runtimeCache !== null && runtimeCache.path === path
-    && runtimeCache.mtimeMs === stat.mtimeMs && runtimeCache.size === stat.size) {
-    return runtimeCache.config
-  }
-  try {
-    const document = await readConfigDocument()
-    runtimeCache = {
-      path,
-      mtimeMs: stat.mtimeMs,
-      size: stat.size,
-      present: document.present,
-      config: document.config,
-    }
-  } catch (error) {
-    // 配置损坏时保留最后一次成功值，不让长任务被一个临时坏文件打断。
-    runtimeCache = {
-      path,
-      mtimeMs: stat.mtimeMs,
-      size: stat.size,
-      present: true,
-      config: runtimeCache?.config ?? EMPTY_CONFIG,
-    }
-    throw error
-  }
-  return runtimeCache.config
+/**
+ * settings 写入的深度校验：normalizeConfig 抛错即拒绝这次写入。
+ * 归一化结果这里不需要，仅借用它的校验语义（HH:mm、IANA、days、非负等）。
+ */
+function assertValidSettings(value) {
+  normalizeConfig(value, defaultTimeZone())
 }
 
 /* ------------------------------------------------------------------ */
-/* HTTP 查询接口                                                       */
+/* HTTP 提交确认接口                                                    */
 /* ------------------------------------------------------------------ */
 
 function sendJson(res, status, value) {
@@ -178,60 +121,6 @@ function readJsonBody(req, limit = 32 * 1024) {
     })
     req.on('error', reject)
   })
-}
-
-async function handleConfigRoute(res) {
-  try {
-    const document = await readConfigDocument()
-    const config = document.config
-    sendJson(res, 200, {
-      ok: true,
-      present: document.present,
-      path: document.path,
-      rules: config.rules,
-      remindIntervalMinutes: config.remindIntervalMinutes,
-      promptTimeoutSeconds: config.promptTimeoutSeconds,
-      autoContinueOnPeakEnd: config.autoContinueOnPeakEnd,
-    })
-  } catch (error) {
-    sendJson(res, 500, { ok: false, error: error.message })
-  }
-}
-
-/**
- * 保存配置（设置页用）：整份替换，先经 normalizeConfig 校验，
- * 再原子写入（临时文件 + rename），失败时磁盘上的旧配置保持原样。
- * 写入的是归一化结果：缺省字段被显式补齐，未知字段被丢弃。
- */
-async function handleSaveConfigRoute(req, res) {
-  let payload
-  try {
-    payload = await readJsonBody(req, 128 * 1024)
-  } catch (error) {
-    sendJson(res, 400, { ok: false, error: error.message })
-    return
-  }
-  let config
-  try {
-    config = normalizeConfig(payload, defaultTimeZone())
-  } catch (error) {
-    sendJson(res, 400, { ok: false, error: error.message })
-    return
-  }
-  const path = configPath()
-  const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`
-  try {
-    await fs.mkdir(dirname(path), { recursive: true })
-    await fs.writeFile(tmpPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8')
-    await fs.rename(tmpPath, path)
-  } catch (error) {
-    await fs.rm(tmpPath, { force: true }).catch(() => {})
-    sendJson(res, 500, { ok: false, error: `failed to write config: ${error.message}` })
-    return
-  }
-  // 让下一次 runtimeConfig 立即重读（mtime 已变，这里主动清缓存更直接）。
-  runtimeCache = null
-  sendJson(res, 200, { ok: true, path })
 }
 
 /* ------------------------------------------------------------------ */
@@ -467,7 +356,7 @@ async function askPeakQuestion(ctx, agent, question, timeoutSeconds, callerSigna
   }
 }
 
-async function handleSubmitConfirmRoute(ctx, req, res) {
+async function handleSubmitConfirmRoute(ctx, source, req, res) {
   let payload
   try {
     payload = await readJsonBody(req)
@@ -493,7 +382,7 @@ async function handleSubmitConfirmRoute(ctx, req, res) {
 
   let config
   try {
-    config = await runtimeConfig()
+    config = source()
   } catch (error) {
     sendJson(res, 500, { ok: false, error: error.message })
     return
@@ -514,7 +403,7 @@ async function handleSubmitConfirmRoute(ctx, req, res) {
   const timeoutSeconds = Math.max(0, config.promptTimeoutSeconds || 0)
   const autoContinue = config.autoContinueOnPeakEnd === true
     ? async () => {
-      const latest = await runtimeConfig()
+      const latest = source()
       return peakStateAt(latest.rules, provider, model, new Date()).peak === true
     }
     : undefined
@@ -544,13 +433,13 @@ async function handleSubmitConfirmRoute(ctx, req, res) {
   sendJson(res, 200, { ok: true, action: 'continue', reason: decision.reason ?? decision.kind })
 }
 
-async function decideForToolCall(ctx, exec, states, tails) {
+async function decideForToolCall(ctx, source, exec, states, tails) {
   const agent = exec.agent
   const state = stateFor(states, agent.id)
 
   if (state.paused) return { kind: 'pause', peak: null }
 
-  const config = await runtimeConfig()
+  const config = source()
   const route = agentRoute(agent)
   const routeKey = `${route.provider}\u0000${route.model}`
   if (state.lastPromptRouteKey !== routeKey) {
@@ -575,7 +464,7 @@ async function decideForToolCall(ctx, exec, states, tails) {
   const timeoutSeconds = Math.max(0, config.promptTimeoutSeconds || 0)
   const autoContinue = config.autoContinueOnPeakEnd === true
     ? async () => {
-      const latest = await runtimeConfig()
+      const latest = source()
       const latestRoute = agentRoute(agent)
       return peakStateAt(latest.rules, latestRoute.provider, latestRoute.model, new Date()).peak === true
     }
@@ -636,7 +525,24 @@ function pausedToolResult(agent, state, peak) {
 /* 插件入口                                                            */
 /* ------------------------------------------------------------------ */
 
-export function apply(ctx) {
+export function apply(ctx, rawConfig = {}) {
+  // schemastery 先补齐默认值，再深度校验组合 base（非法规则要 fail loud）。
+  const config = Config(rawConfig ?? {})
+  normalizeConfig(config, defaultTimeZone())
+
+  // 当前生效配置来源：settings 存在时用其解析值，否则回退组合 base。
+  // 读取时统一 normalizeConfig 归一化，保证 rules/全局项结构与旧版一致。
+  let source = () => normalizeConfig(config, defaultTimeZone())
+  installSettingsSection(ctx, NS, Config, config, {
+    setSource: (current) => {
+      source = () => normalizeConfig(current(), defaultTimeZone())
+    },
+    onChange: () => {
+      // 每次工具调用/提交确认都通过 source() 现读，无需在变更时重建派生状态。
+    },
+    validate: assertValidSettings,
+  })
+
   const disposers = []
   const sessionStates = new Map()
   const promptTails = new Map()
@@ -654,26 +560,13 @@ export function apply(ctx) {
         return
       }
       try {
-        if (pathname === ROUTE_CONFIG) {
-          if (req.method === 'GET' || req.method === 'HEAD') {
-            await handleConfigRoute(res)
-            return
-          }
-          if (req.method === 'POST') {
-            await handleSaveConfigRoute(req, res)
-            return
-          }
-          res.writeHead(405)
-          res.end()
-          return
-        }
         if (pathname === ROUTE_SUBMIT_CONFIRM) {
           if (req.method !== 'POST') {
             res.writeHead(405)
             res.end()
             return
           }
-          await handleSubmitConfirmRoute(ctx, req, res)
+          await handleSubmitConfirmRoute(ctx, source, req, res)
           return
         }
         res.writeHead(404)
@@ -698,7 +591,7 @@ export function apply(ctx) {
 
     let decision
     try {
-      decision = await withPromptGate(promptTails, agent.id, () => decideForToolCall(ctx, exec, sessionStates, promptTails))
+      decision = await withPromptGate(promptTails, agent.id, () => decideForToolCall(ctx, source, exec, sessionStates, promptTails))
     } catch (error) {
       ctx.logger?.warn?.('[dsh-peak-pricing] peak prompt failed, continuing tool call: %s',
         error instanceof Error ? error.message : String(error))
