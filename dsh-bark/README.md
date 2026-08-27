@@ -35,20 +35,20 @@
 dsh plugin --profile web add 'git+ssh://git@github.com/litzh/dsh-plugins.git#<tag>&path:dsh-bark'
 ```
 
-安装后重启 `dsh web`。
+安装后重启 `dsh web`。插件声明了 `dsh.bundle`，会自动加入 profile 的 bundle 列表并插入 entry（`id: dsh-bark`），**无需手工 insert**。
 
 ## 配置
 
+在 `~/.dsh/profiles/web/cordis.patch.yml` 里对已插入的 `dsh-bark` entry 做 config 覆盖即可（**不要再 `insert` 一次，否则会 `duplicate loader entry id: dsh-bark`**）：
+
 ```yaml
-- insert:
-    - id: bark
-      name: 'dsh-bark'
-      config:                       # 以下均为默认值，可按需覆盖
-        server: https://api.day.app # Bark 服务地址；自建服务改这里。缺省读环境变量 BARK_SERVER
-        deviceKey: ''               # 默认设备密钥；缺省读环境变量 BARK_DEVICE_KEY
-        defaultSound: ''            # 默认铃声
-        defaultGroup: ''            # 默认分组
-        defaultIcon: ''             # 默认图标 URL（仅 iOS 15+）
+- id: dsh-bark
+  config:                       # 以下均为默认值，可按需覆盖
+    server: https://api.day.app # Bark 服务地址；自建服务改这里。缺省读环境变量 BARK_SERVER
+    deviceKey: ''               # 默认设备密钥；缺省读环境变量 BARK_DEVICE_KEY
+    defaultSound: ''            # 默认铃声
+    defaultGroup: ''            # 默认分组
+    defaultIcon: ''             # 默认图标 URL（仅 iOS 15+）
 ```
 
 设备密钥获取：在手机上安装 Bark App，App 首页会显示你的推送地址，形如

@@ -1,7 +1,7 @@
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
-const name = 'bark'
+const name = 'dsh-bark'
 const inject = ['tools']
 
 const Config = z.object({
