@@ -1,6 +1,6 @@
 {
   "name": "dsh-peak-pricing",
-  "version": "0.1.0",
+  "version": "0.11.0",
   "description": "DSH 插件：按供应商/模型与星期配置高峰时段；高峰期提交与长任务工具调用前在对话窗口提问确认，可继续 / 本次高峰不再提醒 / 暂停任务",
   "type": "module",
   "exports": {
@@ -38,7 +38,7 @@
   "license": "MIT",
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-settings": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-settings": "^0.1.2-alpha.2",
     "@deepseek-ai/schemastery": "^3.18.1"
   }
 }

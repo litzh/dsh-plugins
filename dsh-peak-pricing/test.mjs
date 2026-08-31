@@ -206,13 +206,14 @@ function createMockCts(agent, initialConfig = { rules: [] }) {
         return [agent]
       },
     },
-    // installSettingsSection 会调用 ctx.inject(['settings'], cb)；这里模拟
-    // settings 服务已激活，注册返回可变的 mockScope。
+    // 插件会调用 ctx.inject(['settings'], cb)；这里模拟 settings 服务
+    // 已激活，installSection 将 source 指向可变的 mockScope。
     inject(_selection, callback) {
       const sctx = Object.create(ctx)
       sctx.settings = {
-        register() {
-          return mockScope
+        installSection(_owner, _ns, _schema, _entry, hooks) {
+          hooks.setSource(() => mockScope.get())
+          hooks.onChange()
         },
       }
       sctx.effect = (fn) => {

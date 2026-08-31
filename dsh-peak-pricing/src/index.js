@@ -24,7 +24,6 @@
  * link 安装时 realpath 后仍可正常加载。
  */
 import z from '@deepseek-ai/schemastery'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import {
   DAY_CODES,
   daysLabel,
@@ -40,7 +39,9 @@ export const inject = ['webServer', 'tools', 'userQuestions', 'agents']
 const ROUTE_PREFIX = '/__dsh-peak-pricing'
 const ROUTE_SUBMIT_CONFIRM = `${ROUTE_PREFIX}/submit-confirm`
 
-const NS = settingsNamespace('peak-pricing')
+// dsh-settings 0.1.2 起命名空间不再经 settingsNamespace() 品牌化，
+// 直接传字面量，由 SettingsProvider.register 运行时校验。
+const NS = 'peak-pricing'
 
 const OPT_CONTINUE = '继续执行'
 const OPT_SUPPRESS = '本次高峰不再提醒'
@@ -533,14 +534,19 @@ export function apply(ctx, rawConfig = {}) {
   // 当前生效配置来源：settings 存在时用其解析值，否则回退组合 base。
   // 读取时统一 normalizeConfig 归一化，保证 rules/全局项结构与旧版一致。
   let source = () => normalizeConfig(config, defaultTimeZone())
-  installSettingsSection(ctx, NS, Config, config, {
-    setSource: (current) => {
-      source = () => normalizeConfig(current(), defaultTimeZone())
-    },
-    onChange: () => {
-      // 每次工具调用/提交确认都通过 source() 现读，无需在变更时重建派生状态。
-    },
-    validate: assertValidSettings,
+  // dsh-settings 0.1.2 起 installSettingsSection 独立函数移除，改为
+  // SettingsProvider.installSection 实例方法，插件自行 inject 可选服务；
+  // settings 不存在时 source 保持组合 base 回退，行为与旧版一致。
+  ctx.inject(['settings'], (sctx) => {
+    sctx.settings.installSection(ctx, NS, Config, config, {
+      setSource: (current) => {
+        source = () => normalizeConfig(current(), defaultTimeZone())
+      },
+      onChange: () => {
+        // 每次工具调用/提交确认都通过 source() 现读，无需在变更时重建派生状态。
+      },
+      validate: assertValidSettings,
+    })
   })
 
   const disposers = []

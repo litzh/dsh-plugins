@@ -381,7 +381,7 @@ function daysLabel(days) {
  *
  * 前端职责：
  *   - 通过 ctx.settingsScope 读取 DSH 标准用户设置 `settings.yaml` 的
- *     `peak-pricing` 命名空间（host 侧经 installSettingsSection 注册，
+ *     `peak-pricing` 命名空间（host 侧经 SettingsProvider.installSection 注册，
  *     热重载实时推送），不再使用独立 JSON 文件；
  *   - 通过 ctx.modelDirectories 读取当前会话选中的 provider/model；
  *   - 用共享 schedule 逻辑判断高峰/低谷：高峰时给 document.body 加
