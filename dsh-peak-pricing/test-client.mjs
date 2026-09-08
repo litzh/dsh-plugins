@@ -162,22 +162,19 @@ async function bootController() {
     },
   }
 
-  const connection = {
-    api: {
-      settings: {
-        async replace({ section }) {
-          settingsScopeHandle.__update(section)
-          return {
-            result: {
-              ok: true,
-              value: {
-                value: section,
-                user: section,
-                revision: 2,
-              },
-            },
-          }
-        },
+  const remote = {
+    settings: {
+      async replace(ns, section, expectedRevision) {
+        assert.equal(ns, 'peak-pricing', 'replace 应写 peak-pricing 命名空间')
+        settingsScopeHandle.__update(section)
+        return {
+          ok: true,
+          value: {
+            value: section,
+            user: section,
+            revision: 2,
+          },
+        }
       },
     },
   }
@@ -209,8 +206,8 @@ async function bootController() {
           },
         }
       }
-      if (name === 'connection') {
-        return connection
+      if (name === 'remote') {
+        return remote
       }
       return null
     },
@@ -374,7 +371,7 @@ test('提交确认走对话窗口 host 提问：defer 不提交，continue 调�
   }
 })
 
-test('设置页保存：经 connection.api.settings.replace 写回并即时生效', async () => {
+test('设置页保存：经 remote.settings.replace 写回并即时生效', async () => {
   const harness = await bootController()
   try {
     const inject = harness.registeredSlot.options.inject()

@@ -21,7 +21,7 @@
  *     /__dsh-peak-pricing/submit-confirm，由 ctx.userQuestions 在对话窗口
  *     中提问；选择“暂不开始”则不调用原 submit，草稿自然留在输入框。
  *   - 注册 settings.section「高峰计价」设置页：可视化编辑规则与全局
- *     选项，经 connection.api.settings.replace 整份写回 settings.yaml。
+ *     选项，经 remote.settings.replace 整份写回 settings.yaml。
  * ========================================================================= */
 
 const SUBMIT_CONFIRM_URL = "/__dsh-peak-pricing/submit-confirm";
@@ -120,7 +120,7 @@ function createController(ctx) {
   const modelDirectories = ctx.get("modelDirectories") ?? null;
   const conversation = ctx.get("conversation") ?? null;
   const settingsScope = ctx.get("settingsScope") ?? null;
-  const connection = ctx.get("connection") ?? null;
+  const remote = ctx.get("remote") ?? null;
 
   // 绑定 `peak-pricing` 命名空间的 settings scope：读配置 + 订阅热重载推送。
   // settings 服务或 ui-settings 缺失时降级为「配置不可用」，高峰判定恒为
@@ -412,25 +412,26 @@ function createController(ctx) {
   }
 
   /**
-   * 设置页整份保存：把表单载荷经 connection.api.settings.replace 写回
+   * 设置页整份保存：把表单载荷经 remote.settings.replace 写回
    * settings.yaml 的 peak-pricing 段。成功返回的 view 即时回填 store，
    * 不等 settings/document-updated 事件链（事件链随后也会幂等触发一次）。
+   * remote 客户端把 host 的 RemoteError 折叠为 { ok: false, error } 结果对象。
    */
   async function saveConfig(payload) {
-    if (connection === null || scope === null) {
+    if (remote === null || typeof remote.settings?.replace !== "function" || scope === null) {
       throw new Error("settings 服务不可用，无法保存配置");
     }
     const snapshot = scope.getSnapshot();
-    const response = await connection.api.settings.replace({
-      ns: "peak-pricing",
-      section: payload,
-      ...(snapshot.revision === undefined ? {} : { expectedRevision: snapshot.revision }),
-    });
-    if (!response?.result?.ok) {
-      const message = response?.result?.error?.message ?? "settings replace failed";
+    const response = await remote.settings.replace(
+      "peak-pricing",
+      payload,
+      snapshot.revision,
+    );
+    if (response?.ok !== true) {
+      const message = response?.error?.message ?? "settings replace failed";
       throw new Error(message);
     }
-    const view = response.result.value;
+    const view = response.value;
     if (view && typeof view.value === "object" && view.value !== null) {
       applyConfigValue(view.value, view.user !== undefined);
     } else {
@@ -536,7 +537,7 @@ function createController(ctx) {
 /* ---- 设置页：可视化编辑 settings.yaml 的 peak-pricing 段 ----
  * 注册为 settings.section 的一页（id=peak-pricing，label=高峰计价）。
  * 草稿从 settings scope 的归一化结果初始化；保存时经
- * connection.api.settings.replace 整份写回，由 host 的 schema + normalizeConfig 校验。 */
+ * remote.settings.replace 整份写回，由 host 的 schema + normalizeConfig 校验。 */
 
 const DAY_LABELS = ["日", "一", "二", "三", "四", "五", "六"]; // 与 DAY_CODES 对齐
 
@@ -900,7 +901,7 @@ function injectCss() {
 }
 
 /* ---- 插件入口 ---- */
-const inject = ["slots", "sessions", "modelDirectories", "conversation", "settingsScope", "connection"];
+const inject = ["slots", "sessions", "modelDirectories", "conversation", "settingsScope", "remote"];
 
 function apply(ctx) {
   injectCss();
