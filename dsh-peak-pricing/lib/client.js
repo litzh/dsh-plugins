@@ -1271,7 +1271,8 @@ function injectCss() {
 }
 
 /* ---- 插件入口 ---- */
-const inject = ["slots", "sessions", "modelDirectories", "conversation", "settingsScope", "remote"];
+// remote 的 settings 子命名空间需按 cordis 规则单独声明（'remote.settings'）。
+const inject = ["slots", "sessions", "modelDirectories", "conversation", "settingsScope", "remote", "remote.settings"];
 
 function apply(ctx) {
   injectCss();
